@@ -4,6 +4,7 @@ import { Engine, fmtValue, isImg } from '../../shared/engine.js';
 import { shiftFormula, refSpans, autoClose, literal, isErr, refBox } from '../../shared/formula.js';
 import { tableAt, tables as allTables, mergeAt, chartData, CHART_TYPES } from '../../shared/types/sheet.js';
 import { drawChart } from './charts.js';
+import { openLive } from './live.js';
 import { sheetBlocks, toMarkdown, toHtml } from '../../shared/export.js';
 
 const DEF_W = 100, DEF_H = 21, HDR_W = 46, HDR_H = 24, FONT = 13;
@@ -817,7 +818,16 @@ export function mount(root, ctx) {
   function undo() { const inv = undoStack.pop(); if (!inv) return; const re = ctx.submit(inv); if (re) redoStack.push(re); refresh(); }
   function redo() { const ops = redoStack.pop(); if (!ops) return; const inv = ctx.submit(ops); if (inv) undoStack.push(inv); refresh(); }
 
+  let live = null;
+  function startLive() {
+    if (edit) commitEdit();
+    live = openLive(ctx, doc, sh().name, {
+      submit: (ops) => submit(ops),
+      onClose: (name) => { live = null; if (!sameName(name, sheetName)) switchSheet(name); ed.focus(); requestDraw(); },
+    });
+  }
   function refresh() {
+    live?.update();
     engine.invalidate();
     if (!doc.sheets.find((s) => sameName(s.name, sheetName))) sheetName = doc.sheets[0].name;
     rebuild();
@@ -1126,7 +1136,9 @@ export function mount(root, ctx) {
     <div class="sep"></div>
     <button class="tb" data-a="freeze" title="Freeze rows/cols up to the active cell">❄</button>
     <button class="tb" data-a="grid" title="Show / hide gridlines (dashboard look)">#</button>
-    <button class="tb" data-a="sum" title="Insert =SUM of selection below">Σ</button>`;
+    <button class="tb" data-a="sum" title="Insert =SUM of selection below">Σ</button>
+    <div class="sep"></div>
+    <button class="tb live" data-a="live" title="Live mode: full-screen real-time view (Esc = back to edit)">▶ Live</button>`;
   ctx.toolbar.append(tb);
   const zoomSel = tb.querySelector('[data-a=zoom]');
   zoomSel.value = '100';
@@ -1163,6 +1175,7 @@ export function mount(root, ctx) {
       case 'freeze': return freezeMenu(btn.getBoundingClientRect());
       case 'wrap': return toggleStyle('wrap');
       case 'chart': return insertChart(btn);
+      case 'live': return startLive();
       case 'grid': return submit([{ op: 'view', sheet: sh().name, grid: sh().view?.grid === false }]);
       case 'borders': return bordersPopover(btn);
       case 'merge': return mergeMenu(btn.getBoundingClientRect());
@@ -1290,6 +1303,7 @@ export function mount(root, ctx) {
   });
   document.addEventListener('keydown', docKey, true);
   function docKey(e) {
+    if (live) return;
     if (document.activeElement === document.body && !e.defaultPrevented && root.isConnected) {
       if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) { ed.focus(); return; }
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', 'Tab', 'Delete', 'Backspace', 'F2'].includes(e.key) || e.ctrlKey || e.metaKey) {
@@ -1789,11 +1803,12 @@ export function mount(root, ctx) {
   ed.focus();
 
   return {
-    unmount() { ro.disconnect(); document.removeEventListener('keydown', docKey, true); ctx.toolbar.innerHTML = ''; },
+    unmount() { live?.close(); ro.disconnect(); document.removeEventListener('keydown', docKey, true); ctx.toolbar.innerHTML = ''; },
     reload() { undoStack = []; redoStack = []; refresh(); },
     resized: () => setTimeout(resize, 0),
     activeRef: () => `${quoteSheet(sh().name)}!${addr(sel.active.c, sel.active.r)}`,
     remote(evt) {
+      live?.update();
       engine.invalidate();
       if (!doc.sheets.find((s) => sameName(s.name, sheetName))) { sheetName = doc.sheets[0].name; sel = freshSel(); }
       rebuild();

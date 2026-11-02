@@ -42,6 +42,13 @@ npm test             # 20 testiä, mm. 2000 kierroksen undo/redo-fuzz
 - kuvat soluihin: `=IMAGE("url")` kuten Sheetsissä, tai liitä/raahaa kuva soluun
 - dokumentit: välilehden oikea klikkaus → Markdown, HTML-raportti (kaaviot kuvina) tai uusi Notes-canvas
 
+**Live-tila (▶ Live)** — sama sheet koko ruudun esitysnäkymänä, reaaliaikaisena:
+- taustalla [Paper Shaders](https://shaders.paper.design) WebGL-mesh-gradientti (vendoroitu `public/vendor/paper-shaders`, Apache-2.0); teemat aurora, nebula, ocean, ember, forest, ink — tallentuu sheetille
+- kaaviot valkoisina huurrelasikorteilla (`backdrop-filter`), KPI-luvut ja palkit animoituvat uusiin arvoihin, muuttunut arvo sykähtää
+- asettelu tulee suoraan sheetistä (solujen paikat, fonttikoot, yhdistetyt solut, kuvat), skaalautuu ruudulle
+- arvoja voi muokata suoraan (taulukon solut, tekstit) — rakennetta (sarakkeet, rivit, kaaviot) ei; ne tehdään Edit-tilassa
+- Esc tai ✎ Edit palaa ruudukkoon; ⛶ = koko näyttö; ohjauspalkki häipyy kun hiiri on paikallaan
+
 **Agentille** (`AGENT_SKILL.md`, CLI `bin/cm.mjs`):
 - `cm changes` → vain muutokset edellisestä kerrasta, tekstinä: `B2: 4 → 10`, `calc: D6 196.8→271.8`, `MOVE A2:E5 → A8:E11`
 - siirrot ja rivilisäykset raportoidaan rakenteellisina tapahtumina, ei satoina solumuutoksina
@@ -62,6 +69,9 @@ public/shared/          ← sama koodi selaimessa JA palvelimella
   types/text.js           toinen canvas-tyyppi (todiste plugin-rakenteesta)
   types/index.js          rekisteri
 public/canvases/<tyyppi>/view.js   selainnäkymä per tyyppi
+public/canvases/sheet/live.js      Live-tila (shader-tausta + lasikortit)
+public/canvases/sheet/charts.js    natiivit canvas-kaaviot (light/glass-teemat)
+public/vendor/paper-shaders/       Paper Shaders, TS-tyypit poistettu node:module stripTypeScriptTypes:lla
 public/app.js           shell: välilehdet, SSE-synkka, historia, milestonet
 lib/store.js            versioitu oplog, atomiset batchit, recalc-diff, commitit
 lib/format.js           token-säästeliäät tekstiesitykset agentille

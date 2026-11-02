@@ -592,8 +592,12 @@ function opView(st, op) {
   const old = { ...(sh.view || {}) };
   const v = { ...(sh.view || {}) };
   if ('grid' in op) { if (op.grid === false) v.grid = false; else delete v.grid; }
+  if ('theme' in op) { if (op.theme) v.theme = String(op.theme); else delete v.theme; }
   if (Object.keys(v).length) sh.view = v; else delete sh.view;
-  return { inverse: [{ op: 'view', sheet: sh.name, grid: old.grid !== false }], changes: [{ k: 'layout', sheet: sh.name, what: `gridlines ${v.grid === false ? 'hidden' : 'shown'}` }] };
+  return {
+    inverse: [{ op: 'view', sheet: sh.name, grid: old.grid !== false, theme: old.theme || null }],
+    changes: [{ k: 'layout', sheet: sh.name, what: 'theme' in op ? `live theme ${v.theme || 'default'}` : `gridlines ${v.grid === false ? 'hidden' : 'shown'}` }],
+  };
 }
 
 // ------------------------------------------------------------------ charts (floating, live)

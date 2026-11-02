@@ -1,0 +1,2 @@
+1923e9f536ea079e2a95d23291cbfacfd69d37f6 Sun Oct 25 18:08:57 2026 +0400
+paper-design/shaders packages/shaders/src, TypeScript types stripped with node:module stripTypeScriptTypes. Unmodified otherwise.

@@ -97,6 +97,7 @@ cm chart-show status                                   # chart's current data as
 cm chart-set status type=bar w=500                     # cm chart-rm id
 cm fmt B2 '{"fs":32,"b":true}'                         # font size in px; valign: top|middle
 cm ops '[{"op":"view","sheet":"Dashboard","grid":false}]'   # hide gridlines (dashboard look)
+cm ops '[{"op":"view","sheet":"Dashboard","theme":"ocean"}]' # Live-mode background: aurora|nebula|ocean|ember|forest|ink
 cm image B2 photo.png                                  # =IMAGE("url") — cells can hold pictures
 cm export Dashboard md                                 # sheet → document (headings, tables, charts, KPIs)
 ```
@@ -113,6 +114,10 @@ Errors: `#REF! #DIV/0! #NAME? #VALUE! #N/A #CYCLE! #ERROR!` (parse). Checks/vali
 
 `cm commit "msg"` saves a named snapshot. `cm diff last` (or `m3`) = what changed since, move-aware.
 `cm restore m3` reverts (user-facing; only when asked). The user saves milestones too (Ctrl+S).
+
+The user can switch any sheet to **Live mode**: a full-screen, real-time presentation of that sheet (shader
+background, glass cards, white charts, animated values). Layout comes from the sheet itself — put titles in big-font
+cells, KPIs/charts where they should appear. Your writes animate in live.
 
 ## Etiquette
 

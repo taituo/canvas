@@ -1,8 +1,13 @@
 // Native canvas chart renderer: column, bar, line, area, pie, kpi. No libraries.
 import { isErr } from '../../shared/formula.js';
 
-export const SERIES = ['#1a73e8', '#e8710a', '#188038', '#d93025', '#9334e6', '#12b5cb', '#f9ab00', '#e52592', '#5f6368'];
-const INK = '#3c4043', MUTED = '#80868b', GRID = '#e8eaed';
+export const THEMES = {
+  light: { series: ['#1a73e8', '#e8710a', '#188038', '#d93025', '#9334e6', '#12b5cb', '#f9ab00', '#e52592', '#5f6368'], ink: '#3c4043', muted: '#80868b', grid: '#e8eaed', axis: '#bdc1c6', bg: '#fff', border: '#dadce0', slice: '#fff', title: true, value: '#202124' },
+  glass: { series: ['rgba(255,255,255,.96)', 'rgba(255,255,255,.62)', 'rgba(255,255,255,.38)', 'rgba(255,255,255,.22)', 'rgba(255,255,255,.80)', 'rgba(255,255,255,.50)', 'rgba(255,255,255,.30)'], ink: 'rgba(255,255,255,.95)', muted: 'rgba(255,255,255,.66)', grid: 'rgba(255,255,255,.14)', axis: 'rgba(255,255,255,.35)', bg: null, border: null, slice: null, title: false, value: '#fff', font: '"SF Pro Display", "Inter", system-ui, sans-serif' },
+};
+export const SERIES = THEMES.light.series;
+let T = THEMES.light;
+let SER = T.series, INK = T.ink, MUTED = T.muted, GRID = T.grid;
 
 function nice(min, max, count = 5) {
   if (min === max) { max = min + 1; min = Math.min(0, min); }
@@ -26,14 +31,16 @@ function ellipsize(g, t, w) {
 }
 
 /** r = {x,y,w,h} in CSS px; z = zoom */
-export function drawChart(g, r, ch, data, z, selected) {
+export function drawChart(g, r, ch, data, z, selected, theme = 'light') {
+  T = THEMES[theme] || THEMES.light;
+  SER = T.series; INK = T.ink; MUTED = T.muted; GRID = T.grid;
   const f = (n) => Math.max(8, n * z);
   g.save();
   g.beginPath(); g.rect(r.x, r.y, r.w, r.h); g.clip();
-  g.fillStyle = '#fff'; g.fillRect(r.x, r.y, r.w, r.h);
+  if (T.bg) { g.fillStyle = T.bg; g.fillRect(r.x, r.y, r.w, r.h); }
   const pad = 12 * z;
   let top = r.y + pad;
-  if (ch.title && ch.type !== 'kpi') {
+  if (T.title && ch.title && ch.type !== 'kpi') {
     g.fillStyle = INK; g.font = `600 ${f(14)}px system-ui, sans-serif`; g.textAlign = 'left'; g.textBaseline = 'top';
     g.fillText(ellipsize(g, ch.title, r.w - 2 * pad), r.x + pad, top);
     top += f(14) + 8 * z;
@@ -46,7 +53,8 @@ export function drawChart(g, r, ch, data, z, selected) {
     else axisChart(g, area, ch, data, z, f);
   } catch (e) { empty(g, area, f, 'chart error'); }
   g.restore();
-  g.strokeStyle = selected ? '#1a73e8' : '#dadce0';
+  if (!T.border && !selected) return;
+  g.strokeStyle = selected ? '#1a73e8' : T.border;
   g.lineWidth = selected ? 2 : 1;
   g.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
   if (selected) { g.fillStyle = '#1a73e8'; g.fillRect(r.x + r.w - 7, r.y + r.h - 7, 8, 8); }
@@ -67,7 +75,7 @@ function kpi(g, r, ch, k, z, f) {
   let size = Math.min(r.h * 0.5, 64 * z);
   g.font = `600 ${size}px system-ui, sans-serif`;
   while (size > 10 && g.measureText(text).width > r.w - 28 * z) { size -= 2; g.font = `600 ${size}px system-ui, sans-serif`; }
-  g.fillStyle = isErr(v) ? '#d93025' : '#202124'; g.textBaseline = 'alphabetic';
+  g.fillStyle = isErr(v) ? '#d93025' : T.value; g.textBaseline = 'alphabetic';
   g.fillText(text, r.x + 14 * z, r.y + r.h - 16 * z);
 }
 
@@ -78,7 +86,7 @@ function legend(g, a, series, z, f) {
   for (const [i, s] of series.entries()) {
     const w = g.measureText(s.name).width + 22 * z;
     if (x + w > a.x + a.w && x > a.x) { x = a.x; y -= f(11) + 6 * z; }
-    g.fillStyle = SERIES[i % SERIES.length]; g.fillRect(x, y - 4 * z, 10 * z, 8 * z);
+    g.fillStyle = SER[i % SER.length]; g.fillRect(x, y - 4 * z, 10 * z, 8 * z);
     g.fillStyle = INK; g.fillText(s.name, x + 14 * z, y);
     x += w;
   }
@@ -127,18 +135,19 @@ function axisChart(g, a, ch, data, z, f) {
     const k = data.series.length;
     const inner = band * 0.72, bw = inner / k;
     data.series.forEach((s, j) => {
-      g.fillStyle = SERIES[j % SERIES.length];
+      g.fillStyle = SER[j % SER.length];
       s.values.forEach((v, i) => {
         if (v === null) return;
         const start = (horiz ? P.y : P.x) + band * i + (band - inner) / 2 + bw * j;
         const p = pos(v);
-        if (horiz) g.fillRect(Math.min(zero, p), start, Math.abs(p - zero), Math.max(1, bw - 1));
-        else g.fillRect(start, Math.min(zero, p), Math.max(1, bw - 1), Math.abs(p - zero));
+        const rect = horiz ? [Math.min(zero, p), start, Math.abs(p - zero), Math.max(1, bw - 1)] : [start, Math.min(zero, p), Math.max(1, bw - 1), Math.abs(p - zero)];
+        if (!T.bg && g.roundRect) { g.beginPath(); g.roundRect(...rect, Math.min(6 * z, rect[2] / 2, rect[3] / 2)); g.fill(); }
+        else g.fillRect(...rect);
       });
     });
   } else {
     data.series.forEach((s, j) => {
-      const col = SERIES[j % SERIES.length];
+      const col = SER[j % SER.length];
       const pts = s.values.map((v, i) => (v === null ? null : [P.x + band * (i + 0.5), pos(v)]));
       if (ch.type === 'area') {
         g.fillStyle = col + '33';
@@ -156,7 +165,7 @@ function axisChart(g, a, ch, data, z, f) {
     });
   }
   // axis line
-  g.strokeStyle = '#bdc1c6'; g.lineWidth = 1; g.beginPath();
+  g.strokeStyle = T.axis; g.lineWidth = 1; g.beginPath();
   if (horiz) { g.moveTo(Math.round(zero) + 0.5, P.y); g.lineTo(Math.round(zero) + 0.5, P.y + P.h); }
   else { g.moveTo(P.x, Math.round(zero) + 0.5); g.lineTo(P.x + P.w, Math.round(zero) + 0.5); }
   g.stroke();
@@ -173,12 +182,13 @@ function pie(g, a, data, z, f) {
   let ang = -Math.PI / 2;
   items.forEach((x, i) => {
     const d = (x.v / total) * Math.PI * 2;
-    g.fillStyle = SERIES[i % SERIES.length];
+    g.fillStyle = SER[i % SER.length];
     g.beginPath(); g.moveTo(cx, cy); g.arc(cx, cy, R, ang, ang + d); g.closePath(); g.fill();
-    g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.stroke();
+    if (T.slice) { g.strokeStyle = T.slice; g.lineWidth = 1.5; g.stroke(); }
+    else { g.save(); g.globalCompositeOperation = 'destination-out'; g.strokeStyle = '#000'; g.lineWidth = 3 * z; g.stroke(); g.restore(); }
     if (d > 0.35) {
       const m = ang + d / 2;
-      g.fillStyle = '#fff'; g.font = `600 ${f(11)}px system-ui`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = T.bg ? '#fff' : 'rgba(20,20,40,.75)'; g.font = `600 ${f(11)}px system-ui`; g.textAlign = 'center'; g.textBaseline = 'middle';
       g.fillText(Math.round((x.v / total) * 100) + '%', cx + Math.cos(m) * R * 0.62, cy + Math.sin(m) * R * 0.62);
     }
     ang += d;
@@ -188,7 +198,7 @@ function pie(g, a, data, z, f) {
   const lx = a.x + a.w - legendW + 8 * z;
   let ly = cy - (Math.min(items.length, Math.floor(a.h / lh)) * lh) / 2 + lh / 2;
   items.slice(0, Math.floor(a.h / lh)).forEach((x, i) => {
-    g.fillStyle = SERIES[i % SERIES.length]; g.fillRect(lx, ly - 4 * z, 10 * z, 8 * z);
+    g.fillStyle = SER[i % SER.length]; g.fillRect(lx, ly - 4 * z, 10 * z, 8 * z);
     g.fillStyle = INK; g.fillText(ellipsize(g, x.l, legendW - 24 * z), lx + 14 * z, ly);
     ly += lh;
   });
