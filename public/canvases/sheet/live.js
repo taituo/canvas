@@ -3,7 +3,7 @@
 // sheet's own layout — charts in white, KPIs, named tables (values editable, structure locked), titles.
 import { ShaderMount, meshGradientFragmentShader, getShaderColorFromString, ShaderFitOptions } from '../../vendor/paper-shaders/index.js';
 import { drawChart } from './charts.js';
-import { tables as allTables, chartData, mergeAt, tableColumns } from '../../shared/types/sheet.js';
+import { tables as allTables, chartData, mergeAt, tableColumns, usedRange } from '../../shared/types/sheet.js';
 import { Engine, fmtValue, isImg } from '../../shared/engine.js';
 import { addr, parseAddr, parseRange, splitSheet, sameName } from '../../shared/a1.js';
 import { isErr } from '../../shared/formula.js';
@@ -29,6 +29,8 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
     <div class="lv-bg"></div>
     <div class="lv-scroll"><div class="lv-stage"></div></div>
     <div class="lv-bar">
+      <div class="lv-modes"><button class="lv-btn" data-m="sheet" title="Each sheet with its own layout">Sheet</button><button class="lv-btn" data-m="auto" title="All tables, charts and KPIs from every sheet, auto-composed">✦ Combined</button></div>
+      <div class="lv-sep"></div>
       <div class="lv-sheets"></div>
       <div class="lv-sep"></div>
       <div class="lv-themes"></div>
@@ -68,8 +70,9 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
     const rect = (R) => { const x = cx(R.c1), y = ry(R.r1); return { x, y, w: cx(R.c2 + 1) - x, h: ry(R.r2 + 1) - y }; };
     return { cx, ry, rect };
   }
-  function model() {
-    const s = sh(), en = new Engine(doc), G = geometry(s);
+  function model(name = sheetName) {
+    const s = doc.sheets.find((x) => sameName(x.name, name)) || doc.sheets[0];
+    const en = new Engine(doc), G = geometry(s), K = s.name + '::';
     const items = [];
     const tabs = allTables(doc).filter((x) => x.sh === s);
     const charts = (s.charts || []).map((ch) => {
@@ -80,7 +83,7 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
     for (const { ch, r } of charts) {
       let data;
       try { data = chartData(doc, s.name, ch, en); } catch { data = { labels: [], series: [] }; }
-      items.push({ key: 'chart:' + ch.id, kind: ch.type === 'kpi' ? 'kpi' : 'chart', ch, data, r });
+      items.push({ key: K + 'chart:' + ch.id, sheet: s.name, kind: ch.type === 'kpi' ? 'kpi' : 'chart', ch, data, r });
     }
     for (const x of tabs) {
       const r = G.rect(x.R);
@@ -97,7 +100,7 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
         rows.push(row);
       }
       const above = x.R.r1 > 0 && [x.R.c1, x.R.c1 + 1].some((c) => String(s.cells[addr(c, x.R.r1 - 1)]?.v ?? '').trim());
-      items.push({ key: 'table:' + x.t.name, kind: 'table', name: x.t.name, label: !above, cols, rows, r: { ...r, h: Math.max(r.h, 60) } });
+      items.push({ key: K + 'table:' + x.t.name, sheet: s.name, kind: 'table', name: x.t.name, label: !above, cols, rows, r: { ...r, h: Math.max(r.h, 60) } });
     }
     const inTable = (c, r) => tabs.some((x) => c >= x.R.c1 && c <= x.R.c2 && r >= x.R.r1 && r <= x.R.r2);
     for (const A of Object.keys(s.cells)) {
@@ -111,11 +114,77 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
       if (under(r)) continue;
       const v = en.value(s, p.c, p.r);
       const st = cell.s || {};
-      if (isImg(v)) items.push({ key: 'img:' + A, kind: 'img', url: v.url, r });
-      else items.push({ key: 'text:' + A, kind: 'text', A, raw: cell.v, text: fmtValue(v), st, num: typeof v === 'number', formula: cell.v[0] === '=', merged: !!M, r });
+      if (isImg(v)) items.push({ key: K + 'img:' + A, sheet: s.name, kind: 'img', url: v.url, r });
+      else items.push({ key: K + 'text:' + A, sheet: s.name, kind: 'text', A, raw: cell.v, text: fmtValue(v), st, num: typeof v === 'number', formula: cell.v[0] === '=', merged: !!M, r });
     }
     return items;
   }
+
+  // ------------------------------------------------------------- combined mode: all sheets, auto-composed
+  let mode = 'sheet';
+  try { mode = localStorage.getItem('lotus.liveMode') === 'auto' ? 'auto' : 'sheet'; } catch {}
+  const excluded = new Set();
+  const ORDER = { kpi: 0, stat: 1, chart: 2, table: 3, img: 4 };
+  function autoItems() {
+    const out = [];
+    for (const s of doc.sheets) {
+      if (excluded.has(s.name)) continue;
+      const items = model(s.name);
+      // a sheet with plain data but no named table: show its used range as an implicit table
+      if (!items.some((it) => it.kind === 'table' || it.kind === 'chart' || it.kind === 'kpi')) {
+        const U = usedRange(s);
+        if (U && U.r2 > U.r1 && U.c2 > U.c1 && (U.r2 - U.r1 + 1) * (U.c2 - U.c1 + 1) <= 4000) {
+          const en = new Engine(doc);
+          const cols = [];
+          for (let c = U.c1; c <= U.c2; c++) cols.push(fmtValue(en.value(s, c, U.r1)) || ' ');
+          const rows = [];
+          for (let r = U.r1 + 1; r <= U.r2; r++) {
+            const row = [];
+            for (let c = U.c1; c <= U.c2; c++) {
+              const A = addr(c, r), cell = s.cells[A], v = en.value(s, c, r);
+              row.push({ A, raw: cell?.v ?? '', text: fmtValue(v), num: typeof v === 'number', formula: typeof cell?.v === 'string' && cell.v[0] === '=', err: isErr(v) });
+            }
+            rows.push(row);
+          }
+          out.push({ key: s.name + '::range', kind: 'table', sheet: s.name, name: s.name, label: true, cols, rows, r: { x: 0, y: 0, w: 400, h: 200 } });
+          continue;
+        }
+      }
+      const rows = new Map();
+      for (const it of items) {
+        if (it.kind !== 'text') { out.push(it); continue; }
+        const r = parseAddr(it.A).r;
+        if (!rows.has(r)) rows.set(r, []);
+        rows.get(r).push(it);
+      }
+      // "label | value" rows become stat cards
+      for (const list of rows.values()) {
+        list.sort((a, b) => parseAddr(a.A).c - parseAddr(b.A).c);
+        if (list.length === 2 && !list[0].num && list[1].num) {
+          out.push({ key: s.name + '::stat:' + list[1].A, kind: 'stat', sheet: s.name, label: list[0].text, value: list[1], r: list[1].r });
+        }
+      }
+    }
+    // the same number under the same label (e.g. a KPI and the cell it reads) is shown once
+    const seenStat = new Set();
+    out.sort((a, b) => ORDER[a.kind] - ORDER[b.kind]);
+    const uniq = out.filter((it) => {
+      if (it.kind !== 'kpi' && it.kind !== 'stat') return true;
+      const label = (it.kind === 'kpi' ? it.ch.title || it.data.kpi.label : it.label).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const val = it.kind === 'kpi' ? it.data.kpi.value : it.value.text;
+      const k = label + '=' + (typeof val === 'number' ? +val.toFixed(6) : String(val).replace(',', '.'));
+      if (seenStat.has(k)) return false;
+      seenStat.add(k);
+      return true;
+    });
+    return uniq.sort((a, b) => ORDER[a.kind] - ORDER[b.kind]);
+  }
+  function spanOf(it, cols) {
+    const n = it.kind === 'table' ? (it.cols.length >= 6 ? 3 : it.cols.length >= 4 ? 2 : 1)
+      : it.kind === 'chart' ? (it.ch.type !== 'pie' && it.ch.w >= 520 ? 2 : 1) : 1;
+    return Math.min(n, cols);
+  }
+  const FIXED_H = { kpi: 150, stat: 118, chart: 300, img: 260 };
 
   // ------------------------------------------------------------- rendering (keyed)
   const nodes = new Map();       // key -> { el, item, tween }
@@ -144,21 +213,53 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
     if (!autoH) el.style.height = r.h * scale + 'px';
   }
 
+  let vtSeq = 0;
   function render() {
-    const items = model();
-    layoutScale(items);
+    const auto = mode === 'auto';
+    const items = auto ? autoItems() : model();
+    stage.classList.toggle('lv-grid', auto);
+    root.classList.toggle('lv-auto', auto);
+    if (auto) { scale = 1; stage.style.height = ''; } else layoutScale(items);
     const seen = new Set();
+    const cols = auto ? Math.max(1, getComputedStyle(stage).gridTemplateColumns.split(' ').length) : 1;
     for (const it of items) {
       seen.add(it.key);
       let n = nodes.get(it.key);
-      if (!n) { n = { el: create(it), item: null, tween: null }; nodes.set(it.key, n); stage.append(n.el); n.el.classList.add('lv-in'); }
+      if (!n) {
+        n = { el: create(it), item: null, tween: null };
+        n.el.style.viewTransitionName = 'lv' + ++vtSeq;
+        nodes.set(it.key, n);
+        stage.append(n.el);
+        n.el.classList.add('lv-in');
+        n.el.addEventListener('animationend', () => n.el.classList.remove('lv-in'), { once: true });
+      }
+      if (auto) {
+        stage.append(n.el); // DOM order = visual order in the grid
+        n.el.style.left = n.el.style.top = n.el.style.width = '';
+        n.el.style.gridColumn = `span ${spanOf(it, cols)}`;
+        n.el.style.height = FIXED_H[it.kind] ? FIXED_H[it.kind] + 'px' : 'auto';
+        n.el.dataset.tag = doc.sheets.length > 1 ? it.sheet : '';
+      } else { n.el.style.gridColumn = ''; n.el.style.gridRowEnd = ''; n.el.dataset.tag = ''; }
       update(n, it);
       n.item = it;
     }
     for (const [k, n] of nodes) if (!seen.has(k)) { n.el.remove(); nodes.delete(k); }
-    reflow(items);
+    if (auto) masonry(items); else reflow(items);
+    for (const n of nodes.values()) if (n.item.kind === 'chart') paintChart(n, n.item);
     renderBar();
     tick();
+  }
+  /** Masonry: each card spans as many 4px grid rows as its height needs; `dense` fills the holes. */
+  function masonry(items) {
+    for (const it of items) {
+      const el = nodes.get(it.key).el;
+      el.style.gridRowEnd = `span ${Math.ceil((el.offsetHeight + 18) / 4)}`;
+    }
+  }
+  /** Switch layouts with a View Transition so cards morph to their new places. */
+  function transition(fn) {
+    if (document.startViewTransition && !matchMedia('(prefers-reduced-motion: reduce)').matches) document.startViewTransition(fn);
+    else fn();
   }
 
   /** Tables take their natural height; everything below them (overlapping horizontally) moves down. */
@@ -199,6 +300,11 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
       el.innerHTML = '<div class="lv-label"></div><div class="lv-tw"><table><thead></thead><tbody></tbody></table></div>';
       el.addEventListener('focusout', (e) => commitCell(e.target));
       el.addEventListener('keydown', (e) => cellKey(e));
+    } else if (it.kind === 'stat') {
+      el.className = 'lv-card lv-stat';
+      el.innerHTML = '<div class="lv-label"></div><div class="lv-statv"></div>';
+      el.addEventListener('focusout', (e) => commitCell(e.target));
+      el.addEventListener('keydown', (e) => cellKey(e));
     } else if (it.kind === 'img') {
       el.className = 'lv-card lv-imgcard';
       el.innerHTML = '<img alt="">';
@@ -212,7 +318,16 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
 
   function update(n, it) {
     const el = n.el;
-    place(el, it.r);
+    el.dataset.sheet = it.sheet;
+    if (mode === 'sheet') place(el, it.r);
+    if (it.kind === 'stat') {
+      el.querySelector('.lv-label').textContent = it.label;
+      const v = el.querySelector('.lv-statv');
+      v.dataset.a = it.value.A; v.dataset.raw = it.value.raw; v.dataset.sheet = it.sheet;
+      v.contentEditable = it.value.formula ? 'false' : 'plaintext-only';
+      if (v !== document.activeElement && v.textContent !== it.value.text) { if (n.item) pulse(el); v.textContent = it.value.text; }
+      return;
+    }
     if (it.kind === 'chart') {
       el.querySelector('.lv-title').textContent = it.ch.title || '';
       const prev = n.item?.data;
@@ -220,20 +335,21 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
       else if (!prev) n.tween = { from: zeroed(it.data), to: it.data, t0: performance.now() };
       else if (!sameShape(prev, it.data)) n.tween = null;
       n.data = it.data;
-      paintChart(n, it);
+      if (mode === 'sheet') paintChart(n, it);
     } else if (it.kind === 'kpi') {
       el.querySelector('.lv-label').textContent = it.ch.title || it.data.kpi.label || '';
       const v = it.data.kpi.value;
       const pv = n.item?.data.kpi.value;
       n.kpi = { to: v, text: it.data.kpi.text, from: typeof pv === 'number' ? (n.kpi?.cur ?? pv) : typeof v === 'number' ? 0 : v, t0: performance.now() };
-      el.querySelector('.lv-num').style.fontSize = Math.min(it.r.h * scale * 0.48, it.r.w * scale * 0.3) + 'px';
+      const kh = mode === 'auto' ? FIXED_H.kpi : it.r.h * scale, kw = mode === 'auto' ? el.clientWidth || 300 : it.r.w * scale;
+      el.querySelector('.lv-num').style.fontSize = Math.min(kh * 0.48, kw * 0.3) + 'px';
       if (n.item && pv !== v) pulse(el);
     } else if (it.kind === 'table') {
       const lab = el.querySelector('.lv-label');
       lab.textContent = it.name;
-      lab.style.display = it.label ? '' : 'none';
+      lab.style.display = it.label || mode === 'auto' ? '' : 'none';
       const thead = el.querySelector('thead'), tbody = el.querySelector('tbody');
-      const fsz = Math.max(11, Math.min(17, 12 * scale));
+      const fsz = mode === 'auto' ? 14 : Math.max(11, Math.min(17, 12 * scale));
       el.style.fontSize = fsz + 'px';
       const sig = it.cols.join('\u0001') + '|' + it.rows.length;
       if (n.sig !== sig && !el.contains(document.activeElement)) {
@@ -285,7 +401,8 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
   function paintChart(n, it) {
     const cv = n.el.querySelector('canvas');
     const dpr = window.devicePixelRatio || 1;
-    const w = it.r.w * scale, h = it.r.h * scale - 34 * Math.min(scale, 1.3);
+    const card = n.el, title = card.querySelector('.lv-title');
+    const w = Math.max(40, card.clientWidth - 24), h = Math.max(40, card.clientHeight - 28 - (title.offsetHeight || 0) - 6);
     const W = Math.max(1, Math.round(w * dpr)), H = Math.max(1, Math.round(h * dpr));
     if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; cv.style.width = w + 'px'; cv.style.height = h + 'px'; }
     const g = cv.getContext('2d');
@@ -328,7 +445,7 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
     if (!A || el.contentEditable === 'false') return;
     const text = el.textContent.replace(/\n+$/, '');
     if (text === (el.dataset.raw ?? '')) return;
-    submit([{ op: 'set', sheet: sh().name, cells: { [A]: text === '' ? null : text } }]);
+    submit([{ op: 'set', sheet: el.dataset.sheet || el.closest('[data-sheet]')?.dataset.sheet || sh().name, cells: { [A]: text === '' ? null : text } }]);
   }
   function cellKey(e) {
     const el = e.target;
@@ -341,17 +458,25 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
   function renderBar() {
     const sheets = $('.lv-sheets');
     const names = doc.sheets.map((s) => s.name).join('|');
-    if (sheets.dataset.names !== names || sheets.dataset.cur !== sh().name) {
+    const sig = names + '|' + sh().name + '|' + mode + '|' + [...excluded].join(',');
+    if (sheets.dataset.sig !== sig) {
       sheets.innerHTML = '';
       for (const s of doc.sheets) {
         const b = document.createElement('button');
-        b.className = 'lv-btn' + (s === sh() ? ' on' : '');
+        const on = mode === 'auto' ? !excluded.has(s.name) : s === sh();
+        b.className = 'lv-btn' + (on ? ' on' : '') + (mode === 'auto' ? ' chip' : '');
         b.textContent = s.name;
-        b.onclick = () => { sheetName = s.name; for (const n of nodes.values()) n.el.remove(); nodes.clear(); applyTheme(); render(); scroller.scrollTop = 0; };
+        b.title = mode === 'auto' ? 'Include / exclude this sheet' : 'Show this sheet';
+        b.onclick = () => transition(() => {
+          if (mode === 'auto') { if (excluded.has(s.name)) excluded.delete(s.name); else excluded.add(s.name); }
+          else { sheetName = s.name; applyTheme(); scroller.scrollTop = 0; }
+          render();
+        });
         sheets.append(b);
       }
-      sheets.dataset.names = names; sheets.dataset.cur = sh().name;
+      sheets.dataset.sig = sig;
     }
+    root.querySelectorAll('[data-m]').forEach((b) => b.classList.toggle('on', b.dataset.m === mode));
     const th = $('.lv-themes');
     if (!th.childElementCount) {
       for (const [k, p] of Object.entries(PRESETS)) {
@@ -364,6 +489,23 @@ export function openLive(ctx, doc, startSheet, { submit, onClose }) {
       applyTheme();
     }
   }
+  root.querySelectorAll('[data-m]').forEach((b) => (b.onclick = () => {
+    if (mode === b.dataset.m) return;
+    transition(() => { mode = b.dataset.m; try { localStorage.setItem('lotus.liveMode', mode); } catch {} render(); scroller.scrollTop = 0; });
+  }));
+  // Cross-highlight: hovering a value lights up the same value in every other card -> tables connect visually.
+  const norm = (t) => t.trim().toLowerCase();
+  stage.addEventListener('mouseover', (e) => {
+    const t = e.target.closest('td, .lv-text, .lv-statv');
+    const key = t ? norm(t.textContent) : '';
+    stage.querySelectorAll('.lv-link').forEach((x) => x.classList.remove('lv-link'));
+    stage.querySelectorAll('.lv-linked').forEach((x) => x.classList.remove('lv-linked'));
+    if (!key || key.length < 2 || !isNaN(+key.replace(',', '.'))) { stage.classList.remove('lv-linking'); return; }
+    let hits = 0;
+    stage.querySelectorAll('td, .lv-text, .lv-statv').forEach((x) => { if (norm(x.textContent) === key) { x.classList.add('lv-link'); x.closest('.lv-card, .lv-text')?.classList.add('lv-linked'); hits++; } });
+    stage.classList.toggle('lv-linking', hits > 1);
+  });
+  stage.addEventListener('mouseleave', () => { stage.classList.remove('lv-linking'); stage.querySelectorAll('.lv-link, .lv-linked').forEach((x) => x.classList.remove('lv-link', 'lv-linked')); });
   root.querySelector('[data-a=exit]').onclick = close;
   root.querySelector('[data-a=fs]').onclick = () => (document.fullscreenElement ? document.exitFullscreen() : root.requestFullscreen?.());
   let idle;

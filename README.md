@@ -47,6 +47,9 @@ npm test             # 20 testiä, mm. 2000 kierroksen undo/redo-fuzz
 - kaaviot valkoisina huurrelasikorteilla (`backdrop-filter`), KPI-luvut ja palkit animoituvat uusiin arvoihin, muuttunut arvo sykähtää
 - asettelu tulee suoraan sheetistä (solujen paikat, fonttikoot, yhdistetyt solut, kuvat), skaalautuu ruudulle
 - arvoja voi muokata suoraan (taulukon solut, tekstit) — rakennetta (sarakkeet, rivit, kaaviot) ei; ne tehdään Edit-tilassa
+- **✦ Combined**: kaikki taulukot, kaaviot ja KPI:t kaikilta sheeteiltä yhteen näkymään; selain sommittelee (CSS grid masonry, `dense`), kortin leveys sisällön mukaan, "otsikko | luku" -rivit → stat-kortit, sama luku näytetään kerran, sheetit ilman nimettyä taulukkoa näkyvät tunnistettuna taulukkona; sheet-chipit = mukaan/pois
+- taulukot yhdistyvät: hover arvon päällä (esim. "Isi") korostaa saman arvon kaikissa korteissa ja himmentää muut
+- Sheet ⇄ Combined vaihto morfaa korttien paikat View Transitions API:lla
 - Esc tai ✎ Edit palaa ruudukkoon; ⛶ = koko näyttö; ohjauspalkki häipyy kun hiiri on paikallaan
 
 **Agentille** (`AGENT_SKILL.md`, CLI `bin/cm.mjs`):

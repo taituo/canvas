@@ -203,3 +203,25 @@ select.tb { appearance: none; padding: 0 8px; background: none; font: inherit; }
 @keyframes lv-beat { 70% { box-shadow: 0 0 0 8px rgba(255,79,109,0); } 100% { box-shadow: 0 0 0 0 rgba(255,79,109,0); } }
 .tb.live { background: linear-gradient(135deg, #3b1c74, #0aa5d8 60%, #ff4f9a); color: #fff; font-weight: 600; padding: 0 12px; }
 .tb.live:hover { filter: brightness(1.1); background: linear-gradient(135deg, #3b1c74, #0aa5d8 60%, #ff4f9a); }
+
+/* combined (auto-composed) live layout */
+.lv-stage.lv-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(330px, 100%), 1fr)); grid-auto-rows: 4px; grid-auto-flow: dense;
+  column-gap: 18px; padding: 72px 56px 120px; max-width: 1680px; margin: 0 auto; min-height: auto;
+}
+.lv-grid > .lv-card { position: relative; left: auto; top: auto; width: auto; transition: none; align-self: start; }
+.lv-grid > .lv-text { display: none; }
+.lv-card[data-tag]:not([data-tag=""])::after {
+  content: attr(data-tag); position: absolute; top: 12px; right: 14px; font: 600 10px system-ui; letter-spacing: .1em; text-transform: uppercase;
+  color: rgba(255,255,255,.45);
+}
+.lv-stat { display: flex; flex-direction: column; justify-content: space-between; }
+.lv-statv { font-size: 40px; font-weight: 300; letter-spacing: -.03em; font-variant-numeric: tabular-nums; outline: none; border-radius: 8px; align-self: flex-start; padding: 0 4px; margin-left: -4px; }
+.lv-statv[contenteditable="plaintext-only"]:hover { background: rgba(255,255,255,.08); }
+.lv-statv:focus { background: rgba(255,255,255,.14); box-shadow: 0 0 0 1.5px rgba(255,255,255,.6); }
+.lv-modes { display: flex; gap: 2px; }
+.lv-btn.chip:not(.on) { opacity: .5; text-decoration: line-through; }
+.lv-stage .lv-card, .lv-stage .lv-text { transition-property: left, top, width, height, opacity, filter; }
+.lv-stage.lv-linking .lv-card:not(.lv-linked), .lv-stage.lv-linking .lv-text:not(.lv-linked) { opacity: .35; filter: saturate(.6); }
+.lv-link { background: rgba(255,255,255,.9) !important; color: #101028 !important; border-radius: 6px; box-shadow: 0 0 24px rgba(255,255,255,.6); text-shadow: none; }
+::view-transition-group(*) { animation-duration: .55s; animation-timing-function: cubic-bezier(.2,.8,.2,1); }
