@@ -2,7 +2,7 @@
 import { addr, parseAddr, colToName, parseRange, rangeToString, splitSheet, quoteSheet, sameName, norm, inRange } from '../../shared/a1.js';
 import { Engine, fmtValue } from '../../shared/engine.js';
 import { shiftFormula, refSpans, autoClose, literal, isErr, refBox } from '../../shared/formula.js';
-import { tableAt, tables as allTables } from '../../shared/types/sheet.js';
+import { tableAt, tables as allTables, mergeAt } from '../../shared/types/sheet.js';
 
 const DEF_W = 100, DEF_H = 21, HDR_W = 46, HDR_H = 24, FONT = 13;
 const MAXR = 999999, MAXC = 18277;
@@ -168,61 +168,102 @@ export function mount(root, ctx) {
     for (let c = c0; c <= c1 + 1; c++) { const x = px(sx(c) - 1 / dpr); g.moveTo(x, y0); g.lineTo(x, y1); }
     for (let r = r0; r <= r1 + 1; r++) { const y = px(sy(r) - 1 / dpr); g.moveTo(x0, y); g.lineTo(x1, y); }
     g.stroke();
-    const dset = diffCells?.get(s.name);
-    const tabs = (s.tables || []).map((t) => parseRange(t.range));
-    const inTab = (c, r) => { for (const R of tabs) if (c >= R.c1 && c <= R.c2 && r >= R.r1 && r <= R.r2) return R; return null; };
+    const ctx2 = {
+      s, dset: diffCells?.get(s.name), font: '',
+      tabs: (s.tables || []).map((t) => parseRange(t.range)),
+    };
+    const merges = (s.merges || []).map((m) => parseRange(m));
+    const mergeOf = (c, r) => { for (const M of merges) if (inRange(M, c, r)) return M; return null; };
+    const visM = merges.filter((M) => M.r2 >= r0 && M.r1 <= r1 && M.c2 >= c0 && M.c1 <= c1);
+    g.fillStyle = '#fff';
+    for (const M of visM) { const m = rectOf(M); g.fillRect(m.x, m.y, m.w - 1, m.h - 1); } // hide inner gridlines
     g.textBaseline = 'alphabetic';
-    let lastFont = '';
     for (let r = r0; r <= r1; r++) {
       const y = sy(r), h = rh(r) * z;
       for (let c = c0; c <= c1; c++) {
-        const A = addr(c, r);
-        const cell = s.cells[A];
-        const x = sx(c), w = cw(c) * z;
-        const T = tabs.length ? inTab(c, r) : null;
-        if (T && !cell?.s?.fill) {
-          if (r === T.r1) { g.fillStyle = '#c2d7f5'; g.fillRect(x - 1, y - 1, w + 1, h + 1); }
-          else if ((r - T.r1) % 2 === 0) { g.fillStyle = '#f1f5fc'; g.fillRect(x, y, w - 1, h - 1); }
-        }
-        if (dset && dset.has(A)) { g.fillStyle = C.diff; g.fillRect(x, y, w - 1, h - 1); }
-        if (!cell) continue;
-        const st = T && r === T.r1 ? { b: true, ...(cell.s || {}) } : cell.s || {};
-        if (st.fill) { g.fillStyle = st.fill; g.fillRect(x - 1, y - 1, w + 1, h + 1); }
-        if (cell.n) { g.fillStyle = '#e8710a'; g.beginPath(); g.moveTo(x + w - 7 * z, y); g.lineTo(x + w - 1, y); g.lineTo(x + w - 1, y + 6 * z); g.fill(); }
-        if (cell.v === '' || cell.v == null) continue;
-        const v = engine.value(s, c, r);
-        let t = fmtValue(v);
-        if (!t) continue;
-        const font = `${st.i ? 'italic ' : ''}${st.b ? 'bold ' : ''}${FONT * z}px Arial, Helvetica, sans-serif`;
-        if (font !== lastFont) { g.font = font; lastFont = font; }
-        const err = isErr(v);
-        const align = st.align || (typeof v === 'number' ? 'right' : typeof v === 'boolean' || err ? 'center' : 'left');
-        const pad = 3 * z;
-        if (st.wrap || t.includes('\n')) { drawLines(t, st, x, y, w, h, align, err); continue; }
-        const tw = g.measureText(t).width;
-        let clipW = w, needClip = tw > w - 2 * pad;
-        if (needClip && align === 'left' && typeof v !== 'number') {
-          let cc = c + 1, extra = 0;
-          while (tw > w + extra - 2 * pad && cc < c + 30 && !hasContent(s, cc, r) && !s.cells[addr(cc, r)]?.s?.fill) { extra += cw(cc) * z; cc++; }
-          if (extra) { g.fillStyle = '#fff'; g.fillRect(x + w - 1, y, extra, h - 1); }
-          clipW = w + extra;
-          needClip = tw > clipW - 2 * pad;
-        }
-        g.fillStyle = err ? '#c5221f' : st.color || C.text;
-        g.textAlign = align;
-        const tx = align === 'left' ? x + pad : align === 'right' ? x + w - pad - 1 : x + w / 2;
-        const ty = y + h - 5 * z;
-        if (needClip) { g.save(); g.beginPath(); g.rect(x, y, clipW - 1, h); g.clip(); }
-        g.fillText(t, tx, ty);
-        if (st.u || st.s) {
-          const lx = align === 'left' ? tx : align === 'right' ? tx - tw : tx - tw / 2;
-          g.fillRect(lx, st.u ? ty + 2 * z : ty - 4 * z, Math.min(tw, clipW), Math.max(1, z));
-        }
-        if (needClip) g.restore();
-        if (err) { g.fillStyle = '#d93025'; g.beginPath(); g.moveTo(x + w - 7 * z, y); g.lineTo(x + w - 1, y); g.lineTo(x + w - 1, y + 6 * z); g.fill(); }
+        if (merges.length && mergeOf(c, r)) continue;
+        drawCell(ctx2, c, r, sx(c), y, cw(c) * z, h);
       }
     }
+    for (const M of visM) { const m = rectOf(M); drawCell(ctx2, M.c1, M.r1, m.x, m.y, m.w, m.h, true); }
+    // borders (on top of fills)
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      const bd = s.cells[addr(c, r)]?.s?.bd;
+      if (!bd) continue;
+      const M = merges.length ? mergeOf(c, r) : null;
+      const x = sx(c) - 1 / dpr, y = sy(r) - 1 / dpr, w = cw(c) * z, h = rh(r) * z;
+      if (bd.t && (!M || r === M.r1)) edge(x, y, x + w, y, bd.t);
+      if (bd.b && (!M || r === M.r2)) edge(x, y + h, x + w, y + h, bd.b);
+      if (bd.l && (!M || c === M.c1)) edge(x, y, x, y + h, bd.l);
+      if (bd.r && (!M || c === M.c2)) edge(x + w, y, x + w, y + h, bd.r);
+    }
     g.restore();
+  }
+
+  function edge(xa, ya, xb, yb, spec) {
+    const [style, color] = spec.split(' ');
+    const lw = { solid: 1, dashed: 1, dotted: 1, double: 1, medium: 2, thick: 3 }[style] || 1;
+    g.strokeStyle = color || '#000';
+    g.lineWidth = lw;
+    g.setLineDash(style === 'dashed' ? [4, 3] : style === 'dotted' ? [1, 2] : []);
+    const snap = (v) => (lw % 2 ? Math.round(v * dpr) / dpr + 0.5 / dpr : Math.round(v));
+    const horiz = ya === yb;
+    const line = (off) => {
+      g.beginPath();
+      if (horiz) { g.moveTo(xa - (lw > 1 ? lw / 2 : 0), snap(ya) + off); g.lineTo(xb + (lw > 1 ? lw / 2 : 0), snap(yb) + off); }
+      else { g.moveTo(snap(xa) + off, ya - (lw > 1 ? lw / 2 : 0)); g.lineTo(snap(xb) + off, yb + (lw > 1 ? lw / 2 : 0)); }
+      g.stroke();
+    };
+    if (style === 'double') { line(-1); line(1); } else line(0);
+    g.setLineDash([]);
+  }
+
+  function drawCell(k, c, r, x, y, w, h, merged) {
+    const s = k.s;
+    const A = addr(c, r);
+    const cell = s.cells[A];
+    let T = null;
+    for (const R of k.tabs) if (c >= R.c1 && c <= R.c2 && r >= R.r1 && r <= R.r2) { T = R; break; }
+    if (T && !cell?.s?.fill) {
+      if (r === T.r1) { g.fillStyle = '#c2d7f5'; g.fillRect(x - 1, y - 1, w + 1, h + 1); }
+      else if ((r - T.r1) % 2 === 0) { g.fillStyle = '#f1f5fc'; g.fillRect(x, y, w - 1, h - 1); }
+    }
+    if (k.dset && k.dset.has(A)) { g.fillStyle = C.diff; g.fillRect(x, y, w - 1, h - 1); }
+    if (!cell) return;
+    const st = T && r === T.r1 ? { b: true, ...(cell.s || {}) } : cell.s || {};
+    if (st.fill) { g.fillStyle = st.fill; g.fillRect(x - 1, y - 1, w + 1, h + 1); }
+    if (cell.n) { g.fillStyle = '#e8710a'; g.beginPath(); g.moveTo(x + w - 7 * z, y); g.lineTo(x + w - 1, y); g.lineTo(x + w - 1, y + 6 * z); g.fill(); }
+    if (cell.v === '' || cell.v == null) return;
+    const v = engine.value(s, c, r);
+    const t = fmtValue(v);
+    if (!t) return;
+    const font = `${st.i ? 'italic ' : ''}${st.b ? 'bold ' : ''}${FONT * z}px Arial, Helvetica, sans-serif`;
+    if (font !== k.font) { g.font = font; k.font = font; }
+    const err = isErr(v);
+    const align = st.align || (typeof v === 'number' ? 'right' : typeof v === 'boolean' || err ? 'center' : 'left');
+    const pad = 3 * z;
+    if (st.wrap || t.includes('\n')) { drawLines(t, st, x, y, w, h, align, err); k.font = ''; return; }
+    const tw = g.measureText(t).width;
+    let clipW = w, needClip = tw > w - 2 * pad;
+    if (needClip && !merged && align === 'left' && typeof v !== 'number') {
+      let cc = c + 1, extra = 0;
+      while (tw > w + extra - 2 * pad && cc < c + 30 && !hasContent(s, cc, r) && !s.cells[addr(cc, r)]?.s?.fill && !mergeAt(s, cc, r)) { extra += cw(cc) * z; cc++; }
+      if (extra) { g.fillStyle = '#fff'; g.fillRect(x + w - 1, y, extra, h - 1); }
+      clipW = w + extra;
+      needClip = tw > clipW - 2 * pad;
+    }
+    g.fillStyle = err ? '#c5221f' : st.color || C.text;
+    g.textAlign = align;
+    const tx = align === 'left' ? x + pad : align === 'right' ? x + w - pad - 1 : x + w / 2;
+    const ty = y + h - 5 * z;
+    if (needClip) { g.save(); g.beginPath(); g.rect(x, y, clipW - 1, h); g.clip(); }
+    g.fillText(t, tx, ty);
+    if (st.u || st.s) {
+      const lx = align === 'left' ? tx : align === 'right' ? tx - tw : tx - tw / 2;
+      g.fillRect(lx, st.u ? ty + 2 * z : ty - 4 * z, Math.min(tw, clipW), Math.max(1, z));
+    }
+    if (needClip) g.restore();
+    if (err) { g.fillStyle = '#d93025'; g.beginPath(); g.moveTo(x + w - 7 * z, y); g.lineTo(x + w - 1, y); g.lineTo(x + w - 1, y + 6 * z); g.fill(); }
   }
 
   function wrapLines(t, width, wrap) {
@@ -343,19 +384,19 @@ export function mount(root, ctx) {
     const pointing = edit && !sameName(edit.sheet, s.name);
     if (!pointing) {
       sel.ranges.forEach((R, i) => {
-        const single = R.c1 === R.c2 && R.r1 === R.r2;
+        const AR = activeRect();
+        const single = (R.c1 === R.c2 && R.r1 === R.r2) || (R.c1 === AR.c1 && R.c2 === AR.c2 && R.r1 === AR.r1 && R.r2 === AR.r2);
         if (single && sel.ranges.length === 1) return;
         const r = rectOf(R);
         paneClip(R);
         g.fillStyle = C.selFill;
         g.beginPath(); g.rect(r.x, r.y, r.w - 1, r.h - 1);
-        if (i === sel.ranges.length - 1) { const a = rectOf({ c1: sel.active.c, r1: sel.active.r, c2: sel.active.c, r2: sel.active.r }); g.rect(a.x, a.y, a.w - 1, a.h - 1); }
+        if (i === sel.ranges.length - 1) { const a = rectOf(activeRect()); g.rect(a.x, a.y, a.w - 1, a.h - 1); }
         g.fill('evenodd');
         g.restore();
         strokeRange(R, C.sel, 1);
       });
-      const A = { c1: sel.active.c, r1: sel.active.r, c2: sel.active.c, r2: sel.active.r };
-      strokeRange(A, C.sel, 2);
+      strokeRange(activeRect(), C.sel, 2);
       if (!edit && sel.ranges.length === 1) {
         const r = rectOf(lastR());
         paneClip(lastR());
@@ -432,7 +473,9 @@ export function mount(root, ctx) {
       ed.style.top = Math.max(0, Math.min(H - 2, y)) + 'px';
       return;
     }
-    const x = sx(edit.c), y = sy(edit.r), w = cw(edit.c) * z, h = rh(edit.r) * z;
+    const EM = mergeR(edit.c, edit.r);
+    const er = EM ? rectOf(EM) : null;
+    const x = sx(edit.c), y = sy(edit.r), w = er ? er.w : cw(edit.c) * z, h = er ? er.h : rh(edit.r) * z;
     const font = `${FONT * z}px Arial, Helvetica, sans-serif`;
     g.font = font;
     const lines = ed.value.split('\n');
@@ -524,14 +567,33 @@ export function mount(root, ctx) {
   }
 
   // ================================================================ selection & navigation
+  const mergeR = (c, r) => mergeAt(sh(), c, r);
+  /** Grow a range until it fully contains every merge it touches (like Sheets). */
+  function expandMerges(R) {
+    const ms = (sh().merges || []).map((m) => parseRange(m));
+    if (!ms.length) return R;
+    for (let changed = true, guard = 0; changed && guard < 50; guard++) {
+      changed = false;
+      for (const M of ms) {
+        if (M.c1 <= R.c2 && R.c1 <= M.c2 && M.r1 <= R.r2 && R.r1 <= M.r2 && !(R.c1 <= M.c1 && R.c2 >= M.c2 && R.r1 <= M.r1 && R.r2 >= M.r2)) {
+          R = { c1: Math.min(R.c1, M.c1), r1: Math.min(R.r1, M.r1), c2: Math.max(R.c2, M.c2), r2: Math.max(R.r2, M.r2) };
+          changed = true;
+        }
+      }
+    }
+    return R;
+  }
+  const activeRect = () => { const M = mergeR(sel.active.c, sel.active.r); return M || { c1: sel.active.c, r1: sel.active.r, c2: sel.active.c, r2: sel.active.r }; };
   function setActive(p, keepTab) {
-    sel = { ranges: [{ c1: p.c, r1: p.r, c2: p.c, r2: p.r }], active: { ...p }, anchor: { ...p }, cursor: { ...p } };
+    const M = mergeR(p.c, p.r);
+    if (M) p = { c: M.c1, r: M.r1 };
+    sel = { ranges: [M || { c1: p.c, r1: p.r, c2: p.c, r2: p.r }], active: { ...p }, anchor: { ...p }, cursor: { ...p } };
     if (!keepTab) tabStartCol = null;
     afterSelect();
   }
   function extendTo(p) {
     sel.cursor = { ...p };
-    sel.ranges[sel.ranges.length - 1] = norm({ c1: sel.anchor.c, r1: sel.anchor.r, c2: p.c, r2: p.r });
+    sel.ranges[sel.ranges.length - 1] = expandMerges(norm({ c1: sel.anchor.c, r1: sel.anchor.r, c2: p.c, r2: p.r }));
     afterSelect();
   }
   function afterSelect() {
@@ -550,7 +612,8 @@ export function mount(root, ctx) {
 
   function syncBars() {
     const R = lastR();
-    const single = sel.ranges.length === 1 && R.c1 === R.c2 && R.r1 === R.r2;
+    const AR = activeRect();
+    const single = sel.ranges.length === 1 && ((R.c1 === R.c2 && R.r1 === R.r2) || (R.c1 === AR.c1 && R.c2 === AR.c2 && R.r1 === AR.r1 && R.r2 === AR.r2));
     if (document.activeElement !== nameBox) nameBox.value = single ? addr(sel.active.c, sel.active.r) : rangeToString(clampFull(R));
     if (!edit) fx.value = sh().cells[addr(sel.active.c, sel.active.r)]?.v ?? '';
     updateStats();
@@ -608,7 +671,9 @@ export function mount(root, ctx) {
   }
 
   function moveActive(dc, dr, extend, toEdge) {
-    const from = extend ? sel.cursor : sel.active;
+    let from = extend ? sel.cursor : sel.active;
+    const M = !extend && mergeR(from.c, from.r);
+    if (M) from = { c: dc > 0 ? M.c2 : M.c1, r: dr > 0 ? M.r2 : M.r1 };
     const t = toEdge ? jump(from, dc, dr) : { c: Math.max(0, from.c + dc), r: Math.max(0, from.r + dr) };
     if (extend) extendTo(t); else setActive(t, true);
     ensureVisible(t.c, t.r);
@@ -903,6 +968,9 @@ export function mount(root, ctx) {
     <button class="tb" data-a="center" title="Align center">≡</button>
     <button class="tb" data-a="right" title="Align right">⫸</button>
     <button class="tb" data-a="wrap" title="Wrap text (Alt+Enter = new line in cell)">↵</button>
+    <div class="sep"></div>
+    <button class="tb" data-a="borders" title="Borders">⊞</button>
+    <button class="tb" data-a="merge" title="Merge cells">⧉</button>
     <button class="tb" data-a="table" title="Make a named table from the selection">▦</button>
     <div class="sep"></div>
     <button class="tb" data-a="freeze" title="Freeze rows/cols up to the active cell">❄</button>
@@ -924,6 +992,8 @@ export function mount(root, ctx) {
       case 'color': case 'fill': return colorPicker(btn, a);
       case 'freeze': return freezeMenu(btn.getBoundingClientRect());
       case 'wrap': return toggleStyle('wrap');
+      case 'borders': return bordersPopover(btn);
+      case 'merge': return mergeMenu(btn.getBoundingClientRect());
       case 'table': return createTable(btn);
       case 'sum': return autoSum();
     }
@@ -943,6 +1013,49 @@ export function mount(root, ctx) {
         p.append(d);
       }
     });
+  }
+  let borderStyle = 'solid', borderColor = '#000000';
+  function bordersPopover(btn) {
+    ctx.popover(btn, (p, close) => {
+      p.style.width = '252px';
+      const types = [['all', '⊞ All'], ['inner', '╋ Inner'], ['horizontal', '━ Horiz'], ['vertical', '┃ Vert'], ['outer', '□ Outer'],
+        ['left', '▏Left'], ['top', '▔ Top'], ['right', '▕ Right'], ['bottom', '▁ Bottom'], ['clear', '✕ Clear']];
+      for (const [t, label] of types) {
+        const b = document.createElement('button');
+        b.className = 'tb'; b.textContent = label; b.style.width = '76px'; b.style.justifyContent = 'flex-start';
+        b.onmousedown = (e) => e.preventDefault();
+        b.onclick = () => {
+          close();
+          submit([{ op: 'borders', sheet: sh().name, ranges: sel.ranges.map((R) => rangeToString(clampFull(R))), type: t, style: borderStyle, color: borderColor }]);
+        };
+        p.append(b);
+      }
+      const styleSel = document.createElement('select');
+      styleSel.className = 'tb';
+      for (const st of ['solid', 'medium', 'thick', 'dashed', 'dotted', 'double']) styleSel.add(new Option(st, st, false, st === borderStyle));
+      styleSel.onchange = () => { borderStyle = styleSel.value; };
+      p.append(styleSel);
+      for (const col of ['#000000', '#5f6368', '#d93025', '#e8710a', '#188038', '#1a73e8', '#9334e6']) {
+        const d = document.createElement('div');
+        d.className = 'sw'; d.style.background = col; d.title = col;
+        if (col === borderColor) d.style.outline = '2px solid #0b57d0';
+        d.onmousedown = (e) => e.preventDefault();
+        d.onclick = () => { borderColor = col; p.querySelectorAll('.sw').forEach((x) => (x.style.outline = '')); d.style.outline = '2px solid #0b57d0'; };
+        p.append(d);
+      }
+    });
+  }
+  function mergeMenu(r) {
+    const R = clampFull(lastR());
+    const multi = R.c1 !== R.c2 || R.r1 !== R.r2;
+    const isMerged = (sh().merges || []).some((m) => { const M = parseRange(m); return M.c1 <= R.c2 && R.c1 <= M.c2 && M.r1 <= R.r2 && R.r1 <= M.r2; });
+    const go = (type) => submit([{ op: 'merge', sheet: sh().name, range: rangeToString(R), type }]);
+    ctx.menu(r.left, r.bottom + 4, [
+      { label: 'Merge all', disabled: !multi, action: () => go('all') },
+      { label: 'Merge horizontally', disabled: R.c1 === R.c2, action: () => go('horizontal') },
+      { label: 'Merge vertically', disabled: R.r1 === R.r2, action: () => go('vertical') },
+      { label: 'Unmerge', disabled: !isMerged, action: () => submit([{ op: 'unmerge', sheet: sh().name, range: rangeToString(R) }]) },
+    ]);
   }
   function freezeMenu(r) {
     const a = sel.active;

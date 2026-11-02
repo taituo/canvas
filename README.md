@@ -4,7 +4,7 @@ Koko ruudun taulukko-canvas, jota sinä ja AI-agentti muokkaatte yhdessä. Nolla
 
 ```bash
 npm start            # http://127.0.0.1:3210
-npm test             # 18 testiä, mm. 2000 kierroksen undo/redo-fuzz
+npm test             # 19 testiä, mm. 2000 kierroksen undo/redo-fuzz
 ```
 
 ## Mitä tässä on
@@ -17,6 +17,7 @@ npm test             # 18 testiä, mm. 2000 kierroksen undo/redo-fuzz
 - siirrä alue raahaamalla reunasta tai Ctrl+X/V → **yksi move-operaatio, viittaukset seuraavat**
 - täyttökahva (sarjat + kaavojen suhteellinen siirto), Ctrl+D / Ctrl+R, Σ
 - kopioi/liitä TSV (Sheets/Excel ↔), lihavointi, värit, tasaus, muistiinpanot, sarakeleveys + tuplaklikkaus autofit
+- reunaviivat ⊞ (kaikki/sisä/ulko/vaaka/pysty/yksittäiset reunat, ohut/paksu/katko/piste/tupla, väri) ja solujen yhdistäminen ⧉ (kaikki/vaaka/pysty/pura) — kuten Sheetsissä
 - rivien/sarakkeiden lisäys/poisto (kontekstivalikko), undo/redo (tarkat käänteisoperaatiot)
 - agentin muokkaukset välähtävät violettina + "agent"-kehys; välilehteen tulee piste jos muutos on muualla
 

@@ -134,6 +134,8 @@ test('fuzz: every op followed by its inverse restores the workbook exactly', () 
     S.apply(st, { op: 'note', cell: cell(), text: 'n' });
     try { S.apply(st, { op: 'table', name: 'T1', range: rng() }); } catch {}
     try { S.apply(st, { op: 'table', name: 'T2', range: 'Two!' + rng() }); } catch {}
+    try { S.apply(st, { op: 'merge', range: rng() }); } catch {}
+    try { S.apply(st, { op: 'borders', range: rng(), type: 'all' }); } catch {}
     const before = canon(st);
     const ops = [
       () => ({ op: 'move', from: rng(), to: (rnd(4) ? '' : 'Two!') + cell() }),
@@ -147,6 +149,9 @@ test('fuzz: every op followed by its inverse restores the workbook exactly', () 
       () => ({ op: 'removeRows', table: 'T1', rows: [1, 2] }),
       () => ({ op: 'addColumn', table: 'T1', name: 'Uusi' }),
       () => ({ op: 'updateRows', table: 'T1', rows: [1], set: { A: 'x' } }),
+      () => ({ op: 'merge', range: rng(), type: ['all', 'horizontal', 'vertical'][rnd(3)] }),
+      () => ({ op: 'unmerge', range: rng() }),
+      () => ({ op: 'borders', range: rng(), type: ['all', 'outer', 'inner', 'clear', 'left'][rnd(5)], style: 'dashed' }),
     ];
     const op = ops[rnd(ops.length)]();
     let res;
@@ -207,4 +212,27 @@ test('named tables: records, structured refs, follow structure', () => {
   assert.deepEqual(rt.columns, ['Nimi', 'Tila', 'Vastuu', 'Huom']);
   S.apply(st, { op: 'renameTable', name: 'Tehtävät', newName: 'Tasks' });
   assert.equal(st.sheets[0].cells.A3.v, '=COUNTIF(Tasks[Tila],"auki")');
+});
+
+test('borders and merges (Sheets semantics)', () => {
+  const st = wb();
+  S.apply(st, { op: 'set', cells: { A1: 'Otsikko', B1: 'x', A2: '1' } });
+  let r = S.apply(st, { op: 'merge', range: 'A1:C1' });
+  assert.deepEqual(st.sheets[0].merges, ['A1:C1']);
+  assert.equal(st.sheets[0].cells.B1, undefined);
+  S.apply(st, r.inverse[0]); for (const o of r.inverse.slice(1)) S.apply(st, o);
+  assert.equal(st.sheets[0].cells.B1.v, 'x');
+  S.apply(st, { op: 'merge', range: 'A1:C1' });
+  S.apply(st, { op: 'insertCols', at: 'B', count: 1 });
+  assert.deepEqual(st.sheets[0].merges, ['A1:D1']);
+  S.apply(st, { op: 'borders', range: 'A2:B3', type: 'outer', style: 'thick', color: '#ff0000' });
+  const c = st.sheets[0].cells;
+  assert.equal(c.A2.s.bd.t, 'thick #ff0000');
+  assert.equal(c.A1.s.bd.b, 'thick #ff0000'); // shared edge written on neighbour too
+  assert.equal(c.B3.s.bd.r, 'thick #ff0000');
+  assert.equal(c.A2.s.bd.r, undefined);
+  S.apply(st, { op: 'borders', range: 'A2:B3', type: 'clear' });
+  assert.equal(c.A2.s?.bd, undefined);
+  S.apply(st, { op: 'unmerge', range: 'B1' });
+  assert.equal(st.sheets[0].merges, undefined);
 });

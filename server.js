@@ -44,6 +44,7 @@ export function createServer(store) {
         lines.push(`[${id}] ${d.type} "${d.title}"`);
         if (Array.isArray(info)) for (const sh of info) {
           lines.push(`  ${sh.name}: used ${sh.used ?? '-'} · ${sh.cells} cells · ${sh.formulas} formulas${sh.freeze.rows || sh.freeze.cols ? ` · frozen ${sh.freeze.rows}r/${sh.freeze.cols}c` : ''}`);
+          if (sh.merges.length) lines.push(`    merged: ${sh.merges.slice(0, 20).join(', ')}${sh.merges.length > 20 ? ' …' : ''}`);
           for (const t of sh.tables) lines.push(`    table ${t.name} ${t.range} · ${t.rows} rows · [${t.columns.join(' | ')}]`);
         }
         else lines.push(`  ${info.lines} lines`);

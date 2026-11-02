@@ -80,6 +80,9 @@ export function apply(st, op) {
     case 'replaceAll': return opReplaceAll(st, op);
     case 'putCells': return opPutCells(st, op);
     case 'setTables': return opSetTables(st, op);
+    case 'borders': return opBorders(st, op);
+    case 'merge': return opMerge(st, op);
+    case 'unmerge': return opUnmerge(st, op);
     case 'table': return opTable(st, op);
     case 'deleteTable': return opDeleteTable(st, op);
     case 'renameTable': return opRenameTable(st, op);
@@ -183,7 +186,11 @@ function opNote(st, op) {
 }
 
 const preCells = (st) => st.sheets.map((s) => ({ name: s.name, cells: clone(s.cells) }));
-const preTables = (st) => ({ op: 'setTables', tables: Object.fromEntries(st.sheets.map((s) => [s.name, s.tables ? clone(s.tables) : null])) });
+const preTables = (st) => ({
+  op: 'setTables',
+  tables: Object.fromEntries(st.sheets.map((s) => [s.name, s.tables ? clone(s.tables) : null])),
+  merges: Object.fromEntries(st.sheets.map((s) => [s.name, s.merges ? [...s.merges] : null])),
+});
 const isFormula = (v) => typeof v === 'string' && v[0] === '=';
 const intersects = (a, b) => a.c1 <= b.c2 && b.c1 <= a.c2 && a.r1 <= b.r2 && b.r1 <= a.r2;
 
@@ -237,6 +244,19 @@ function rewriteAll(st, fn, originOf = () => null) {
       t.range = rangeToString(refBox(out.ref));
       if (!sameName(out.sheet, sh.name)) moves.push([sh, t, out.sheet]);
     }
+  }
+  for (const sh of st.sheets) {
+    if (!sh.merges) continue;
+    sh.merges = sh.merges.map((m) => {
+      const R = parseRange(m);
+      const ref = { sheet: null, a: { c: R.c1, r: R.r1, ac: false, ar: false }, b: { c: R.c2, r: R.r2, ac: false, ar: false } };
+      const out = fn(ref, sh.name, sh);
+      if (out === undefined) return m;
+      if (out === null) return null;
+      const box = refBox(out.ref);
+      if (!sameName(out.sheet, sh.name)) { const to = st.sheets.find((x) => sameName(x.name, out.sheet)); (to.merges ||= []).push(rangeToString(box)); return null; }
+      return box.c1 === box.c2 && box.r1 === box.r2 ? null : rangeToString(box);
+    }).filter(Boolean);
   }
   for (const [from, t, toName] of moves) {
     from.tables.splice(from.tables.indexOf(t), 1);
@@ -484,6 +504,110 @@ function opReplaceAll(st, op) {
   return { inverse, changes: diff(before, st) };
 }
 
+// ------------------------------------------------------------------ borders & merges (Sheets-native)
+const BORDER_STYLES = ['solid', 'medium', 'thick', 'dashed', 'dotted', 'double'];
+/**
+ * borders: { range|ranges, type: all|inner|horizontal|vertical|outer|left|top|right|bottom|clear,
+ *            style?: solid|medium|thick|dashed|dotted|double, color?: "#000" }
+ * Stored per cell as s.bd = { t, b, l, r } with values "style color". Shared edges are written on both cells.
+ */
+function opBorders(st, op) {
+  const type = op.type || 'all';
+  const style = op.style || 'solid';
+  if (!BORDER_STYLES.includes(style)) fail(`Bad border style "${style}" (${BORDER_STYLES.join('|')})`);
+  const val = `${style} ${op.color || '#000000'}`;
+  const ranges = op.ranges || [op.range];
+  const old = {};
+  let sheetName;
+  const edit = (sh, c, r, side, v) => {
+    if (c < 0 || r < 0) return;
+    const A = addr(c, r);
+    if (!(A in old)) old[A] = sh.cells[A]?.s ? clone(sh.cells[A].s) : null;
+    const cell = sh.cells[A] || (sh.cells[A] = { v: '' });
+    const s = cell.s ? { ...cell.s } : {};
+    const bd = { ...(s.bd || {}) };
+    if (v) bd[side] = v; else delete bd[side];
+    if (Object.keys(bd).length) s.bd = bd; else delete s.bd;
+    if (Object.keys(s).length) cell.s = s; else delete cell.s;
+    tidy(sh, A);
+  };
+  const OPP = { t: 'b', b: 't', l: 'r', r: 'l' };
+  const D = { t: [0, -1], b: [0, 1], l: [-1, 0], r: [1, 0] };
+  const set = (sh, c, r, side, v) => { edit(sh, c, r, side, v); edit(sh, c + D[side][0], r + D[side][1], OPP[side], v); };
+  for (const rs of ranges) {
+    const { sh, R: R0 } = target(st, rs, op.sheet);
+    sheetName = sh.name;
+    const ext = usedExtent(sh);
+    const R = { ...R0, r2: R0.r2 > 1e5 ? Math.max(ext.r, R0.r1) : R0.r2, c2: R0.c2 > 1e4 ? Math.max(ext.c, R0.c1) : R0.c2 };
+    if ((R.r2 - R.r1 + 1) * (R.c2 - R.c1 + 1) > 50000) fail('Range too large for borders');
+    for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
+      const top = r === R.r1, bot = r === R.r2, left = c === R.c1, right = c === R.c2;
+      const want = {
+        all: { t: 1, b: 1, l: 1, r: 1 },
+        outer: { t: top, b: bot, l: left, r: right },
+        inner: { b: !bot, r: !right },
+        horizontal: { b: !bot },
+        vertical: { r: !right },
+        top: { t: top }, bottom: { b: bot }, left: { l: left }, right: { r: right },
+        clear: { t: 1, b: 1, l: 1, r: 1 },
+      }[type];
+      if (!want) fail(`Bad border type "${type}"`);
+      for (const side of ['t', 'b', 'l', 'r']) if (want[side]) set(sh, c, r, side, type === 'clear' ? null : val);
+    }
+  }
+  return {
+    inverse: [{ op: 'cellStyles', sheet: sheetName, styles: old }],
+    changes: [{ k: 'format', sheet: sheetName, ranges: ranges.map((x) => splitSheet(x)[1]), style: { borders: type === 'clear' ? 'clear' : `${type} ${val}` } }],
+  };
+}
+
+export function mergeAt(sh, c, r) {
+  for (const m of sh.merges || []) { const R = parseRange(m); if (inRange(R, c, r)) return R; }
+  return null;
+}
+
+/** merge: { range, type: all|horizontal|vertical } — keeps the top-left value of each merged block (like Sheets). */
+function opMerge(st, op) {
+  const { sh, R } = target(st, op.range, op.sheet);
+  const type = op.type || 'all';
+  const blocks = [];
+  if (type === 'all') blocks.push(R);
+  else if (type === 'horizontal') for (let r = R.r1; r <= R.r2; r++) blocks.push({ c1: R.c1, c2: R.c2, r1: r, r2: r });
+  else if (type === 'vertical') for (let c = R.c1; c <= R.c2; c++) blocks.push({ c1: c, c2: c, r1: R.r1, r2: R.r2 });
+  else fail(`Bad merge type "${type}"`);
+  const good = blocks.filter((b) => b.c1 !== b.c2 || b.r1 !== b.r2);
+  if (!good.length) fail('Select more than one cell to merge');
+  if (good.some((b) => (b.r2 - b.r1 + 1) * (b.c2 - b.c1 + 1) > 20000)) fail('Merge range too large');
+  for (const x of tables(st)) if (x.sh === sh && intersects(x.R, R)) fail(`Cannot merge inside table "${x.t.name}"`);
+  const inv = [preTables(st)];
+  const restore = {}, cleared = [];
+  for (const b of good) for (let r = b.r1; r <= b.r2; r++) for (let c = b.c1; c <= b.c2; c++) {
+    if (r === b.r1 && c === b.c1) continue;
+    const A = addr(c, r);
+    const cell = sh.cells[A];
+    if (cell && cell.v !== '') { restore[A] = clone(cell); cleared.push(A); cell.v = ''; tidy(sh, A); }
+  }
+  if (cleared.length) inv.push({ op: 'putCells', sheet: sh.name, cells: restore });
+  sh.merges = (sh.merges || []).filter((m) => !good.some((b) => intersects(parseRange(m), b)));
+  sh.merges.push(...good.map(rangeToString));
+  return {
+    inverse: inv.reverse(),
+    changes: [
+      { k: 'merge', action: 'merge', sheet: sh.name, ranges: good.map(rangeToString) },
+      ...cleared.map((A) => ({ k: 'set', sheet: sh.name, cell: A, old: restore[A].v, new: '' })),
+    ],
+  };
+}
+function opUnmerge(st, op) {
+  const { sh, R } = target(st, op.range, op.sheet);
+  const inv = preTables(st);
+  const removed = (sh.merges || []).filter((m) => intersects(parseRange(m), R));
+  if (!removed.length) return { inverse: [], changes: [] };
+  sh.merges = sh.merges.filter((m) => !removed.includes(m));
+  if (!sh.merges.length) delete sh.merges;
+  return { inverse: [inv], changes: [{ k: 'merge', action: 'unmerge', sheet: sh.name, ranges: removed }] };
+}
+
 // ------------------------------------------------------------------ named tables
 // A table is a named rectangle inside a sheet: first row = column headers, rest = records.
 // Many tables per sheet. Ranges follow moves / row & column inserts like references do.
@@ -525,10 +649,15 @@ const key = (sh, R, r) => String(sh.cells[addr(R.c1, r)]?.v ?? '').trim();
 
 function opSetTables(st, op) {
   const inv = preTables(st);
-  for (const [name, list] of Object.entries(op.tables)) {
+  for (const [name, list] of Object.entries(op.tables || {})) {
     const sh = st.sheets.find((s) => sameName(s.name, name));
     if (!sh) continue;
     if (list) sh.tables = clone(list); else delete sh.tables;
+  }
+  for (const [name, list] of Object.entries(op.merges || {})) {
+    const sh = st.sheets.find((s) => sameName(s.name, name));
+    if (!sh) continue;
+    if (list) sh.merges = [...list]; else delete sh.merges;
   }
   return { inverse: [inv], changes: [] };
 }
@@ -539,6 +668,7 @@ function opTable(st, op) {
   const existing = tables(st).find((x) => sameName(x.t.name, op.name));
   const name = validTableName(st, op.name, existing?.t);
   for (const x of tables(st)) if (x.t !== existing?.t && x.sh === sh && intersects(x.R, R)) fail(`Overlaps table "${x.t.name}"`);
+  for (const m of sh.merges || []) if (intersects(parseRange(m), R)) fail(`Unmerge ${m} before making a table there`);
   const inv = preTables(st);
   const def = { name, range: rangeToString(R) };
   if (existing && existing.sh === sh) sh.tables[sh.tables.indexOf(existing.t)] = def;
@@ -730,6 +860,7 @@ export function describe(st) {
     const f = Object.values(s.cells).filter((c) => typeof c.v === 'string' && c.v[0] === '=').length;
     return {
       name: s.name, used: u ? rangeToString(u) : null, cells: n, formulas: f, freeze: s.freeze,
+      merges: s.merges || [],
       tables: (s.tables || []).map((t) => { const R = parseRange(t.range); return { name: t.name, range: t.range, rows: R.r2 - R.r1, columns: tableColumns(s, R) }; }),
     };
   });
@@ -756,6 +887,8 @@ export function read(st, rangeStr, { limit = 400 } = {}) {
     if (cells.length >= limit) { truncated = true; break; }
     const isF = typeof cell.v === 'string' && cell.v[0] === '=';
     const o = { a: A, r: p.r + 1, raw: cell.v ?? '' };
+    const M = mergeAt(sh, p.c, p.r);
+    if (M) o.merged = rangeToString(M);
     if (isF) o.value = fmtValue(en.value(sh, p.c, p.r));
     if (cell.n) o.note = cell.n;
     cells.push(o);

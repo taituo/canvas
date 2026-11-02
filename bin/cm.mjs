@@ -46,6 +46,8 @@ const help = `cm — canvas-mini agent CLI   (CANVAS_URL=${BASE})
   cm move C23:D32 F23              cut/paste, references follow
   cm insert-rows 5 [n] | delete-rows 5 [n] | insert-cols C [n] | delete-cols C [n]   (add --sheet=Name)
   cm fmt A1:E1 '{"b":true,"fill":"#fff2cc"}'
+  cm border A1:C3 outer [thick] ['#d93025']   all|inner|horizontal|vertical|outer|left|top|right|bottom|clear
+  cm merge A1:C1 [all|horizontal|vertical] | cm unmerge A1:C1
   cm note B2 "text"
   cm add-sheet Name | rename-sheet Old New
   cm read @Tehtävät                 a named table as records:  [5] Nimi: Servot · Tila: auki
@@ -89,6 +91,9 @@ switch (cmd) {
     break;
   }
   case 'fmt': case 'format': await ops([{ op: 'format', range: args[0], style: JSON.parse(args[1]) }]); break;
+  case 'border': case 'borders': await ops([{ op: 'borders', range: args[0], type: args[1] || 'all', style: args[2], color: args[3] }]); break;
+  case 'merge': await ops([{ op: 'merge', range: args[0], type: args[1] || 'all' }]); break;
+  case 'unmerge': await ops([{ op: 'unmerge', range: args[0] }]); break;
   case 'note': await ops([{ op: 'note', cell: args[0], text: args.slice(1).join(' ') || null }]); break;
   case 'add-sheet': await ops([{ op: 'addSheet', name: args[0] }]); break;
   case 'rename-sheet': await ops([{ op: 'renameSheet', sheet: args[0], name: args[1] }]); break;

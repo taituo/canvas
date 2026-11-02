@@ -40,6 +40,8 @@ cm table H1 '[["Kategoria","Summa"],["Servot","=SUMIF(A:A,\"Serv*\",D:D)"]]'
 cm move C23:D32 F23                                 # cut/paste, refs follow
 cm insert-rows 5 2 --sheet=Budjetti
 cm fmt A1:E1 '{"b":true,"fill":"#fff2cc"}'          # keys: b i u s fill color align(left|center|right)
+cm border B6:E11 outer thick '#1a73e8'             # all|inner|horizontal|vertical|outer|left|top|right|bottom|clear
+cm merge B2:E2                                      # merge (keeps top-left value) · cm unmerge B2:E2
 cm note B7 "Is this the 2025 price?"                # ask the user something *in the cell*
 cm focus B2:B9 "checking quantities"                # purple box in the user's UI while you work
 ```
@@ -108,7 +110,8 @@ Errors: `#REF! #DIV/0! #NAME? #VALUE! #N/A #CYCLE! #ERROR!` (parse). Checks/vali
 
 Ops: `set {cells}|{range,values}` · `move {from,to}` · `insertRows|deleteRows {at,count}` · `insertCols|deleteCols {at:"C",count}` ·
 `format {range|ranges,style}` · `note {cell,text}` · `resize {cols:{A:140},rows:{"3":40}}` · `freeze {rows,cols}` ·
-`addSheet {name}` · `renameSheet {sheet,name}` · `deleteSheet {sheet}` ·
+`borders {range|ranges, type, style: solid|medium|thick|dashed|dotted|double, color}` ·
+`merge {range, type: all|horizontal|vertical}` · `unmerge {range}` · `addSheet {name}` · `renameSheet {sheet,name}` · `deleteSheet {sheet}` ·
 tables: `table {name,range}` · `deleteTable {name}` · `renameTable {name,newName}` · `appendRows {table,rows:[{Col:v}|[v,…]]}` ·
 `updateRows {table, key|match{Col:v}|rows[1..], set{Col:v}}` · `removeRows {table, key|match|rows}` · `addColumn {table,name,values?}`. Text docs: `setText {text}` · `append {text}`.
 Every op takes optional `sheet`; cell keys may carry a sheet prefix.
