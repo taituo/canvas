@@ -1,10 +1,13 @@
 // Canvas Mini server. Zero dependencies: node:http + static files + REST + SSE.
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, httpErr } from './lib/store.js';
 import { TYPES } from './public/shared/types/index.js';
+import { exportSheet } from './public/shared/export.js';
+import { runSql, tableJson, jsonToOps, formatResult } from './lib/sql.js';
 import { formatEntries, netChanges, formatRead, formatDiff, formatChangeList } from './lib/format.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -37,7 +40,7 @@ export function createServer(store) {
 
     'GET /api/overview': (req, res, u) => {
       const s = store.state;
-      const lines = [`canvas-mini v${s.version}${store.commits.length ? ` · last milestone ${store.commits.at(-1).id} "${store.commits.at(-1).message}" (v${store.commits.at(-1).version})` : ''}`];
+      const lines = [`Lotus 456 v${s.version}${store.commits.length ? ` · last milestone ${store.commits.at(-1).id} "${store.commits.at(-1).message}" (v${store.commits.at(-1).version})` : ''}`];
       for (const id of s.order) {
         const d = s.docs[id];
         const info = TYPES[d.type].describe(d);
@@ -45,6 +48,7 @@ export function createServer(store) {
         if (Array.isArray(info)) for (const sh of info) {
           lines.push(`  ${sh.name}: used ${sh.used ?? '-'} · ${sh.cells} cells · ${sh.formulas} formulas${sh.freeze.rows || sh.freeze.cols ? ` · frozen ${sh.freeze.rows}r/${sh.freeze.cols}c` : ''}`);
           if (sh.merges.length) lines.push(`    merged: ${sh.merges.slice(0, 20).join(', ')}${sh.merges.length > 20 ? ' …' : ''}`);
+          for (const c of sh.charts) lines.push(`    chart ${c.id} ${c.type}${c.title ? ` "${c.title}"` : ''} ← ${c.source} @${c.at}`);
           for (const t of sh.tables) lines.push(`    table ${t.name} ${t.range} · ${t.rows} rows · [${t.columns.join(' | ')}]`);
         }
         else lines.push(`  ${info.lines} lines`);
@@ -78,6 +82,66 @@ export function createServer(store) {
       const T = TYPES[d.type];
       const r = T.read(d, u.searchParams.get('range') || '', { limit: +(u.searchParams.get('limit') || 400) });
       wantText(u) ? send(res, 200, `v${store.state.version} ` + formatRead(r)) : send(res, 200, { version: store.state.version, ...r });
+    },
+
+    'POST /api/sql': async (req, res, u) => {
+      const b = await body(req);
+      const docId = b.doc || store.state.order.find((id) => store.state.docs[id].type === 'sheet');
+      const r = await runSql(store.state, docId, String(b.sql || ''), { write: !!b.write }).catch((e) => { throw Object.assign(e, { status: e.status || 400 }); });
+      const by = b.by || 'agent';
+      let msg = formatResult(r);
+      if (r.kind === 'rows' && b.into) {
+        const rows = r.rows.map((row) => Object.fromEntries(r.columns.map((c, i) => [c, row[i]])));
+        const e = store.batch({ doc: docId, by, ops: jsonToOps(store.doc(docId), b.into.name, rows, b.into.at), label: `sql → ${b.into.name}` });
+        msg += `\nwritten to table ${b.into.name} (v${e.v})`;
+      }
+      if (r.kind === 'write') {
+        for (const [d, ops] of Object.entries(r.opsByDoc)) {
+          const e = store.batch({ doc: d, by, ops, label: 'sql: ' + String(b.sql).slice(0, 80) });
+          msg += `\n[${d}] v${e.v}: ${e.changes.filter((c) => c.k === 'set').length} cells changed`;
+        }
+      }
+      (u.searchParams.get('format') || b.format) === 'json' ? send(res, 200, r) : send(res, 200, msg);
+    },
+    'GET /api/table': (req, res, u) => send(res, 200, tableJson(store.doc(u.searchParams.get('doc')), u.searchParams.get('name'))),
+    'PUT /api/table': async (req, res) => {
+      const b = await body(req);
+      const d = store.doc(b.doc);
+      const e = store.batch({ doc: d.id, by: b.by || 'agent', ops: jsonToOps(d, b.name, b.rows, b.at), label: `json → ${b.name}` });
+      send(res, 200, { version: e.v });
+    },
+
+    'GET /api/chart': (req, res, u) => {
+      const d = store.doc(u.searchParams.get('doc'));
+      const x = TYPES.sheet.allCharts(d).find((x) => x.ch.id === u.searchParams.get('id'));
+      if (!x) throw httpErr(404, 'No such chart');
+      const data = TYPES.sheet.chartData(d, x.sh.name, x.ch);
+      if (u.searchParams.get('format') === 'json') return send(res, 200, { ...x.ch, data });
+      if (data.kpi) return send(res, 200, `${x.ch.id} kpi "${x.ch.title || ''}": ${data.kpi.text}`);
+      send(res, 200, [`${x.ch.id} ${x.ch.type} "${x.ch.title || ''}"`, `label | ${data.series.map((s) => s.name).join(' | ')}`,
+        ...data.labels.map((l, i) => `${l} | ${data.series.map((s) => s.values[i] ?? '∅').join(' | ')}`)].join('\n'));
+    },
+
+    'POST /api/assets': (req, res) => new Promise((ok, bad) => {
+      const type = (req.headers['content-type'] || '').split(';')[0];
+      const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' }[type];
+      if (!ext) return bad(httpErr(415, 'Only png/jpg/gif/webp/svg images'));
+      const chunks = []; let n = 0;
+      req.on('data', (d) => { n += d.length; if (n > 20e6) { bad(httpErr(413, 'Image too large (20 MB)')); req.destroy(); } else chunks.push(d); });
+      req.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        const name = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 16) + '.' + ext;
+        fs.mkdirSync(path.join(store.dir, 'assets'), { recursive: true });
+        fs.writeFileSync(path.join(store.dir, 'assets', name), buf);
+        send(res, 200, { url: '/assets/' + name });
+        ok();
+      });
+    }),
+    'GET /api/export': (req, res, u) => {
+      const d = store.doc(u.searchParams.get('doc'));
+      const fmt = u.searchParams.get('format') || 'md';
+      const out = exportSheet(d, u.searchParams.get('sheet'), fmt);
+      send(res, 200, out, fmt === 'html' ? 'text/html; charset=utf-8' : 'text/markdown; charset=utf-8');
     },
 
     'GET /api/find': (req, res, u) => {
@@ -126,12 +190,19 @@ export function createServer(store) {
     const u = new URL(req.url, 'http://x');
     try {
       if (req.method === 'OPTIONS') {
-        res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PATCH,DELETE', 'access-control-allow-headers': 'content-type' });
+        res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE', 'access-control-allow-headers': 'content-type' });
         return res.end();
       }
       const h = routes[`${req.method} ${u.pathname}`];
       if (h) return await h(req, res, u);
       if (u.pathname.startsWith('/api/')) throw httpErr(404, `No route ${req.method} ${u.pathname}. See GET /api/help`);
+      if (u.pathname.startsWith('/assets/')) {
+        const f = path.join(store.dir, 'assets', path.basename(u.pathname));
+        if (!fs.existsSync(f)) throw httpErr(404, 'No such asset');
+        const ext = path.extname(f).slice(1);
+        res.writeHead(200, { 'content-type': { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' }[ext] || 'application/octet-stream', 'cache-control': 'max-age=31536000, immutable' });
+        return fs.createReadStream(f).pipe(res);
+      }
       // static
       let p = path.normalize(decodeURIComponent(u.pathname)).replace(/^(\.\.[/\\])+/, '');
       if (p === '/' || p === '\\') p = '/index.html';
@@ -152,7 +223,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const store = new Store(DATA).init();
   const srv = createServer(store);
   srv.listen(PORT, HOST, () => {
-    console.log(`canvas-mini  http://${HOST}:${PORT}   data: ${DATA}`);
+    console.log(`Lotus 456  http://${HOST}:${PORT}   data: ${DATA}`);
     if (HOST !== '127.0.0.1' && HOST !== 'localhost') console.warn('WARNING: no auth. Do not expose to untrusted networks.');
   });
   const bye = () => { store.flush(); process.exit(0); };

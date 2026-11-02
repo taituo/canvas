@@ -136,6 +136,8 @@ test('fuzz: every op followed by its inverse restores the workbook exactly', () 
     try { S.apply(st, { op: 'table', name: 'T2', range: 'Two!' + rng() }); } catch {}
     try { S.apply(st, { op: 'merge', range: rng() }); } catch {}
     try { S.apply(st, { op: 'borders', range: rng(), type: 'all' }); } catch {}
+    S.apply(st, { op: 'addChart', type: 'line', range: rng(), at: cell() });
+    S.apply(st, { op: 'addChart', type: 'kpi', value: 'Two!' + cell(), at: cell() });
     const before = canon(st);
     const ops = [
       () => ({ op: 'move', from: rng(), to: (rnd(4) ? '' : 'Two!') + cell() }),
@@ -151,6 +153,8 @@ test('fuzz: every op followed by its inverse restores the workbook exactly', () 
       () => ({ op: 'updateRows', table: 'T1', rows: [1], set: { A: 'x' } }),
       () => ({ op: 'merge', range: rng(), type: ['all', 'horizontal', 'vertical'][rnd(3)] }),
       () => ({ op: 'unmerge', range: rng() }),
+      () => ({ op: 'updateChart', id: 'chart1', type: 'bar', at: cell(), range: rng() }),
+      () => ({ op: 'deleteChart', id: 'chart2' }),
       () => ({ op: 'borders', range: rng(), type: ['all', 'outer', 'inner', 'clear', 'left'][rnd(5)], style: 'dashed' }),
     ];
     const op = ops[rnd(ops.length)]();
@@ -235,4 +239,31 @@ test('borders and merges (Sheets semantics)', () => {
   assert.equal(c.A2.s?.bd, undefined);
   S.apply(st, { op: 'unmerge', range: 'B1' });
   assert.equal(st.sheets[0].merges, undefined);
+});
+
+test('charts: live data from range/table, follow structure, exact undo', () => {
+  const st = wb();
+  S.apply(st, { op: 'set', range: 'B2', values: [['Kk', 'Tulot', 'Menot'], ['Tam', 10, 4], ['Hel', 12, 5], ['Maa', 9, 7]] });
+  S.apply(st, { op: 'table', name: 'Talous', range: 'B2:D5' });
+  S.apply(st, { op: 'addChart', type: 'column', range: 'B2:D5', at: 'G2', title: 'Talous' });
+  S.apply(st, { op: 'addChart', type: 'pie', table: 'Talous', x: 'Kk', y: ['Tulot'], at: 'G20' });
+  S.apply(st, { op: 'set', cells: { F1: '=SUM(Talous[Tulot])' } });
+  S.apply(st, { op: 'addChart', type: 'kpi', value: 'F1', title: 'Tulot yht.', at: 'M2' });
+  let d = S.chartData(st, 'Sheet1', st.sheets[0].charts[0]);
+  assert.deepEqual(d.labels, ['Tam', 'Hel', 'Maa']);
+  assert.deepEqual(d.series.map((s) => s.name), ['Tulot', 'Menot']);
+  assert.deepEqual(S.chartData(st, 'Sheet1', st.sheets[0].charts[1]).series[0].values, [10, 12, 9]);
+  assert.equal(S.chartData(st, 'Sheet1', st.sheets[0].charts[2]).kpi.text, '31');
+  S.apply(st, { op: 'insertRows', at: 1, count: 2 });
+  assert.equal(st.sheets[0].charts[0].range, 'B4:D7');
+  assert.equal(st.sheets[0].charts[0].at, 'G4');
+  assert.equal(st.sheets[0].charts[2].value, 'F3');
+  S.apply(st, { op: 'renameTable', name: 'Talous', newName: 'Raha' });
+  assert.equal(st.sheets[0].charts[1].table, 'Raha');
+  const r = S.apply(st, { op: 'updateChart', id: 'chart1', type: 'line', range: '@Raha' });
+  assert.equal(st.sheets[0].charts[0].table, 'Raha');
+  for (const o of r.inverse) S.apply(st, o);
+  assert.equal(st.sheets[0].charts[0].range, 'B4:D7');
+  assert.equal(st.sheets[0].charts[0].table, undefined);
+  assert.equal(st.sheets[0].charts[0].type, 'column');
 });

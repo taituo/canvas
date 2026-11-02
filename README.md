@@ -1,10 +1,10 @@
-# canvas-mini
+# Lotus 456
 
-Koko ruudun taulukko-canvas, jota sinä ja AI-agentti muokkaatte yhdessä. Nolla riippuvuutta: Node 20+ ja selain.
+Koko ruudun taulukko-canvas, jota sinä ja AI-agentti muokkaatte yhdessä — taulukot, SQL, kaaviot, dashboardit, dokumentit. Nolla riippuvuutta: Node 22+ ja selain.
 
 ```bash
 npm start            # http://127.0.0.1:3210
-npm test             # 19 testiä, mm. 2000 kierroksen undo/redo-fuzz
+npm test             # 20 testiä, mm. 2000 kierroksen undo/redo-fuzz
 ```
 
 ## Mitä tässä on
@@ -28,6 +28,19 @@ npm test             # 19 testiä, mm. 2000 kierroksen undo/redo-fuzz
 - kaavoissa `=COUNTIF(Tehtävät[Tila],"auki")`; taulukot seuraavat siirtoja ja rivilisäyksiä
 - teksti on ensiluokkaista: Alt+Enter rivinvaihto solussa, ↵ rivitys, tuplaklikkaus rivin reunaan = sovita korkeus
 - agentti: `cm read @Tehtävät` → tietueet, `cm update Tehtävät 'Kytke servot' Tila=valmis`, `cm add …`; muutosvirta kertoo `⟨Tehtävät[Kytke servot].Tila⟩`
+
+**SQL ja JSON** — jokainen nimetty taulukko on SQL-taulu (Noden oma `node:sqlite`, ei asennettavaa):
+- SELECT/JOIN/GROUP BY kaikkien taulukoiden yli, myös muista workbookeista (`"doc.Taulu"`); SQL-nappi yläpalkissa
+- UPDATE/INSERT/DELETE kirjoittavat takaisin taulukkoon tavallisina opeina (versioitu, undo, muutosvirta)
+- tuloksen voi tallentaa uudeksi taulukoksi; taulukko ⇄ JSON-array (`cm json`, `cm put`)
+- workbookeja voi olla rajattomasti (yläpalkin välilehdet), jokaisessa monta sheetiä
+
+**Dashboardit ja visualisointi** — kaaviot ovat natiivia canvas-piirtoa, kelluvat ruudukon päällä ja lukevat dataa livenä:
+- column, bar, line, area, pie, KPI (iso luku yhdestä solusta); lähde = alue, nimetty taulukko tai solu
+- 📊 tai oikea klikkaus → lisää; raahaa, muuta kokoa kulmasta, tuplaklikkaus = muokkaa, Delete = poista
+- fonttikoot 9–72 px (rivit kasvavat), pystytasaus, gridlinjat piiloon (#) → dashboard-ilme; demo: *Dashboard*-sheet
+- kuvat soluihin: `=IMAGE("url")` kuten Sheetsissä, tai liitä/raahaa kuva soluun
+- dokumentit: välilehden oikea klikkaus → Markdown, HTML-raportti (kaaviot kuvina) tai uusi Notes-canvas
 
 **Agentille** (`AGENT_SKILL.md`, CLI `bin/cm.mjs`):
 - `cm changes` → vain muutokset edellisestä kerrasta, tekstinä: `B2: 4 → 10`, `calc: D6 196.8→271.8`, `MOVE A2:E5 → A8:E11`

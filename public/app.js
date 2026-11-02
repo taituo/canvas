@@ -196,7 +196,7 @@ function connect() {
       if (!S.docs.find((d) => d.id === S.docId)) openDoc(S.docs[0].id);
       return;
     }
-    if (e.type === 'commit') { S.commits.push(e.commit); if (!$('#drawer').hidden) renderDrawer(); toast(`Milestone ${e.commit.id}: ${e.commit.message}`); return; }
+    if (e.type === 'commit') { S.commits.push(e.commit); if (!$('#drawer').hidden && drawerMode === 'history') renderDrawer(); toast(`Milestone ${e.commit.id}: ${e.commit.message}`); return; }
     if (e.type === 'focus') { if (e.doc === S.docId) S.view?.focus?.(e); return; }
     if (e.type !== 'batch') return;
     S.version = Math.max(S.version, e.v);
@@ -205,7 +205,7 @@ function connect() {
       S.lastAgent = { by: e.by, ts: Date.now(), where: e.touched.slice(0, 3).map((t) => `${t.sheet ?? ''}${t.sheet ? '!' : ''}${t.range}`).join(', ') || e.doc };
       renderActivity();
     }
-    if (!$('#drawer').hidden) renderDrawerSoon();
+    if (!$('#drawer').hidden && drawerMode === 'history') renderDrawerSoon();
     if (e.doc !== S.docId || e.clientId === clientId) return;
     if (S.pending) { S.dirty = true; return; }
     try { for (const op of e.ops) applyDocOp(S.doc, op); } catch { reloadDoc(); return; }
@@ -244,13 +244,64 @@ addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); milestonePopover(); }
 });
 
-$('#btnHistory').onclick = () => {
+let drawerMode = 'history';
+function toggleDrawer(mode) {
   const d = $('#drawer');
-  d.hidden = !d.hidden;
-  $('#btnHistory').classList.toggle('on', !d.hidden);
-  if (!d.hidden) renderDrawer();
+  const open = d.hidden || drawerMode !== mode;
+  drawerMode = mode;
+  d.hidden = !open;
+  $('#btnHistory').classList.toggle('on', open && mode === 'history');
+  $('#btnSql').classList.toggle('on', open && mode === 'sql');
+  if (open) (mode === 'sql' ? renderSql() : renderDrawer());
   S.view?.resized?.();
-};
+}
+$('#btnHistory').onclick = () => toggleDrawer('history');
+$('#btnSql').onclick = () => toggleDrawer('sql');
+
+let lastSql = 'SELECT * FROM Tehtävät';
+let lastResult = null;
+function renderSql() {
+  const d = $('#drawer');
+  d.innerHTML = '';
+  const head = document.createElement('header');
+  head.innerHTML = '<span style="flex:1">SQL <small style="font-weight:400;color:var(--muted)">— named tables are SQL tables</small></span>';
+  const x = document.createElement('button'); x.className = 'tb'; x.textContent = '✕'; x.onclick = () => toggleDrawer('sql');
+  head.append(x);
+  const sec = document.createElement('section');
+  const ta = document.createElement('textarea');
+  ta.value = lastSql; ta.rows = 6; ta.spellcheck = false;
+  ta.style.cssText = 'width:100%;font:12px/1.4 ui-monospace,Menlo,monospace;border:1px solid var(--line);border-radius:4px;padding:6px;resize:vertical';
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:6px;margin-top:6px;align-items:center;flex-wrap:wrap';
+  const run = document.createElement('button'); run.className = 'mini'; run.textContent = 'Run ⌘↵';
+  const into = document.createElement('button'); into.className = 'mini'; into.textContent = 'Save result as table at active cell';
+  const pre = document.createElement('pre');
+  const exec = async (body) => {
+    lastSql = ta.value;
+    try { pre.textContent = await post('/api/sql', { doc: S.docId, sql: ta.value, by: 'user', ...body }); }
+    catch (e) { pre.textContent = '✗ ' + e.message; }
+  };
+  run.onclick = () => exec({ write: !/^\s*(select|with)\b/i.test(ta.value) });
+  into.onclick = () => {
+    const at = S.view?.activeRef?.();
+    if (!at) return;
+    popover(into, (p, close) => {
+      const i = document.createElement('input'); i.placeholder = 'Table name'; i.value = 'Tulos';
+      const ok = document.createElement('button'); ok.className = 'btn'; ok.textContent = 'Save';
+      const go = () => { close(); exec({ into: { name: i.value, at } }); };
+      ok.onclick = go; i.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
+      p.append(i, ok); setTimeout(() => i.focus());
+    });
+  };
+  ta.onkeydown = (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run.click(); } e.stopPropagation(); };
+  const hint = document.createElement('div');
+  hint.style.cssText = 'color:var(--muted);font-size:11px;margin-top:6px';
+  hint.textContent = 'SELECT reads. UPDATE / INSERT / DELETE write back into the tables (undoable, versioned). Other workbooks: "doc.Table".';
+  row.append(run, into);
+  sec.append(ta, row, hint);
+  d.append(head, sec, pre);
+  setTimeout(() => ta.focus());
+}
 
 let drawerTimer = null;
 function renderDrawerSoon() { clearTimeout(drawerTimer); drawerTimer = setTimeout(renderDrawer, 300); }

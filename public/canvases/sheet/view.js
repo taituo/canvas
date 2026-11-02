@@ -1,8 +1,10 @@
 // Spreadsheet canvas view. Canvas-rendered, virtualized grid with Sheets-style interactions.
 import { addr, parseAddr, colToName, parseRange, rangeToString, splitSheet, quoteSheet, sameName, norm, inRange } from '../../shared/a1.js';
-import { Engine, fmtValue } from '../../shared/engine.js';
+import { Engine, fmtValue, isImg } from '../../shared/engine.js';
 import { shiftFormula, refSpans, autoClose, literal, isErr, refBox } from '../../shared/formula.js';
-import { tableAt, tables as allTables, mergeAt } from '../../shared/types/sheet.js';
+import { tableAt, tables as allTables, mergeAt, chartData, CHART_TYPES } from '../../shared/types/sheet.js';
+import { drawChart } from './charts.js';
+import { sheetBlocks, toMarkdown, toHtml } from '../../shared/export.js';
 
 const DEF_W = 100, DEF_H = 21, HDR_W = 46, HDR_H = 24, FONT = 13;
 const MAXR = 999999, MAXC = 18277;
@@ -62,6 +64,7 @@ export function mount(root, ctx) {
   let preview = null;         // { kind:'col'|'row', i, size }
   let dpr = 1, W = 0, H = 0, raf = 0, animating = false;
   let tabStartCol = null;
+  let selChart = null;        // id of selected chart
 
   function freshSel() { return { ranges: [{ c1: 0, r1: 0, c2: 0, r2: 0 }], active: { c: 0, r: 0 }, anchor: { c: 0, r: 0 }, cursor: { c: 0, r: 0 } }; }
   const sh = () => doc.sheets.find((s) => sameName(s.name, sheetName)) || doc.sheets[0];
@@ -147,6 +150,7 @@ export function mount(root, ctx) {
     if (f.cols) drawCells(ra, rb, 0, f.cols - 1, X0, YF, XF, H);
     if (f.rows && f.cols) drawCells(0, f.rows - 1, 0, f.cols - 1, X0, Y0, XF, YF);
     drawOverlays(now);
+    drawCharts();
     drawHeaders(ca, cb, ra, rb);
     g.fillStyle = C.freeze;
     if (f.cols) g.fillRect(XF - 1, 0, 3, H);
@@ -164,10 +168,12 @@ export function mount(root, ctx) {
     g.save();
     g.beginPath(); g.rect(x0, y0, x1 - x0, y1 - y0); g.clip();
     // gridlines
-    g.strokeStyle = C.grid; g.lineWidth = 1 / dpr; g.beginPath();
-    for (let c = c0; c <= c1 + 1; c++) { const x = px(sx(c) - 1 / dpr); g.moveTo(x, y0); g.lineTo(x, y1); }
-    for (let r = r0; r <= r1 + 1; r++) { const y = px(sy(r) - 1 / dpr); g.moveTo(x0, y); g.lineTo(x1, y); }
-    g.stroke();
+    if (s.view?.grid !== false) {
+      g.strokeStyle = C.grid; g.lineWidth = 1 / dpr; g.beginPath();
+      for (let c = c0; c <= c1 + 1; c++) { const x = px(sx(c) - 1 / dpr); g.moveTo(x, y0); g.lineTo(x, y1); }
+      for (let r = r0; r <= r1 + 1; r++) { const y = px(sy(r) - 1 / dpr); g.moveTo(x0, y); g.lineTo(x1, y); }
+      g.stroke();
+    }
     const ctx2 = {
       s, dset: diffCells?.get(s.name), font: '',
       tabs: (s.tables || []).map((t) => parseRange(t.range)),
@@ -235,9 +241,11 @@ export function mount(root, ctx) {
     if (cell.n) { g.fillStyle = '#e8710a'; g.beginPath(); g.moveTo(x + w - 7 * z, y); g.lineTo(x + w - 1, y); g.lineTo(x + w - 1, y + 6 * z); g.fill(); }
     if (cell.v === '' || cell.v == null) return;
     const v = engine.value(s, c, r);
+    if (isImg(v)) { drawImg(v, x, y, w, h); return; }
     const t = fmtValue(v);
     if (!t) return;
-    const font = `${st.i ? 'italic ' : ''}${st.b ? 'bold ' : ''}${FONT * z}px Arial, Helvetica, sans-serif`;
+    const fsz = (st.fs || FONT) * z;
+    const font = `${st.i ? 'italic ' : ''}${st.b ? 'bold ' : ''}${fsz}px Arial, Helvetica, sans-serif`;
     if (font !== k.font) { g.font = font; k.font = font; }
     const err = isErr(v);
     const align = st.align || (typeof v === 'number' ? 'right' : typeof v === 'boolean' || err ? 'center' : 'left');
@@ -255,7 +263,7 @@ export function mount(root, ctx) {
     g.fillStyle = err ? '#c5221f' : st.color || C.text;
     g.textAlign = align;
     const tx = align === 'left' ? x + pad : align === 'right' ? x + w - pad - 1 : x + w / 2;
-    const ty = y + h - 5 * z;
+    const ty = st.valign === 'top' ? y + fsz + 3 * z : st.valign === 'middle' ? y + h / 2 + fsz * 0.36 : y + h - Math.max(5 * z, fsz * 0.3);
     if (needClip) { g.save(); g.beginPath(); g.rect(x, y, clipW - 1, h); g.clip(); }
     g.fillText(t, tx, ty);
     if (st.u || st.s) {
@@ -264,6 +272,38 @@ export function mount(root, ctx) {
     }
     if (needClip) g.restore();
     if (err) { g.fillStyle = '#d93025'; g.beginPath(); g.moveTo(x + w - 7 * z, y); g.lineTo(x + w - 1, y); g.lineTo(x + w - 1, y + 6 * z); g.fill(); }
+  }
+
+  const imgCache = new Map();
+  function drawImg(v, x, y, w, h) {
+    let e = imgCache.get(v.url);
+    if (!e) {
+      e = { img: new Image(), ok: false, bad: false };
+      e.img.onload = () => { e.ok = true; requestDraw(); };
+      e.img.onerror = () => { e.bad = true; requestDraw(); };
+      e.img.src = v.url;
+      imgCache.set(v.url, e);
+    }
+    if (!e.ok) { g.fillStyle = e.bad ? '#d93025' : '#9aa0a6'; g.font = `${11 * z}px system-ui`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(e.bad ? 'image error' : '…', x + w / 2, y + h / 2); g.textBaseline = 'alphabetic'; return; }
+    const iw = e.img.naturalWidth, ih = e.img.naturalHeight, bw = w - 4, bh = h - 4;
+    let dw = bw, dh = bh;
+    if (v.mode !== 2) { const k = Math.min(bw / iw, bh / ih); dw = iw * k; dh = ih * k; }  // 1 = fit (default), 2 = stretch
+    g.save(); g.beginPath(); g.rect(x, y, w - 1, h - 1); g.clip();
+    g.drawImage(e.img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+    g.restore();
+  }
+  async function uploadImage(file, c, r) {
+    if (!file || !/^image\//.test(file.type)) return false;
+    try {
+      const res = await fetch('/api/assets', { method: 'POST', headers: { 'content-type': file.type }, body: file });
+      const { url } = await res.json();
+      const s = sh();
+      const ops = [{ op: 'set', sheet: s.name, cells: { [addr(c, r)]: `=IMAGE("${url}")` } }];
+      if ((s.rowH[r] ?? DEF_H) < 80) ops.push({ op: 'resize', sheet: s.name, rows: { [r + 1]: 120 } });
+      if ((s.colW[c] ?? DEF_W) < 140) ops.push({ op: 'resize', sheet: s.name, cols: { [colToName(c)]: 180 } });
+      submit(ops);
+    } catch (e) { ctx.toast('Upload failed: ' + e.message, true); }
+    return true;
   }
 
   function wrapLines(t, width, wrap) {
@@ -281,7 +321,7 @@ export function mount(root, ctx) {
     return out;
   }
   function drawLines(t, st, x, y, w, h, align, err) {
-    const pad = 3 * z, lh = FONT * z * 1.3;
+    const pad = 3 * z, lh = (st.fs || FONT) * z * 1.3;
     const lines = wrapLines(t, w - 2 * pad, !!st.wrap);
     g.save(); g.beginPath(); g.rect(x, y, w - 1, h - 1); g.clip();
     g.fillStyle = err ? '#c5221f' : st.color || C.text;
@@ -294,8 +334,8 @@ export function mount(root, ctx) {
     const cell = s.cells[addr(c, r)];
     if (!cell || cell.v === '') return 1;
     const st = cell.s || {};
-    g.font = `${st.i ? 'italic ' : ''}${st.b ? 'bold ' : ''}${FONT}px Arial, Helvetica, sans-serif`;
-    return wrapLines(fmtValue(engine.value(s, c, r)), cw(c) - 6, !!st.wrap).length;
+    g.font = `${st.i ? 'italic ' : ''}${st.b ? 'bold ' : ''}${st.fs || FONT}px Arial, Helvetica, sans-serif`;
+    return wrapLines(fmtValue(engine.value(s, c, r)), cw(c) - 6, !!st.wrap).length * ((st.fs || FONT) / FONT);
   }
 
   /** Clip to the pane(s) a range lives in so scrolled overlays don't paint over frozen panes. */
@@ -413,6 +453,79 @@ export function mount(root, ctx) {
     if (drag && drag.type === 'fill' && drag.tgt) strokeRange(drag.tgt, '#5f6368', 1, [4, 3]);
   }
 
+  function chartRect(ch) {
+    const p = parseAddr(splitSheet(ch.at)[1]) || { c: 0, r: 0 };
+    return { x: sx(p.c) + (ch.dx || 0) * z, y: sy(p.r) + (ch.dy || 0) * z, w: ch.w * z, h: ch.h * z, p };
+  }
+  function drawCharts() {
+    for (const ch of sh().charts || []) {
+      let r = chartRect(ch);
+      if (drag && drag.type === 'chart' && drag.id === ch.id && drag.cur) r = { ...r, ...drag.cur };
+      if (r.x > W || r.y > H || r.x + r.w < 0 || r.y + r.h < 0) continue;
+      let data;
+      try { data = chartData(doc, sh().name, ch, engine); } catch { data = { labels: [], series: [] }; }
+      paneClip({ c1: r.p.c, r1: r.p.r });
+      drawChart(g, r, ch, data, z, selChart === ch.id);
+      g.restore();
+    }
+  }
+  function hitChart(x, y) {
+    const list = sh().charts || [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const r = chartRect(list[i]);
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return { ch: list[i], r, handle: x > r.x + r.w - 12 && y > r.y + r.h - 12 };
+    }
+    return null;
+  }
+  function chartEditor(ch, anchor) {
+    ctx.popover(anchor, (p, close) => {
+      p.style.width = '300px';
+      const row = (label, el) => { const l = document.createElement('label'); l.style.cssText = 'display:flex;gap:6px;align-items:center;width:100%'; const t = document.createElement('span'); t.textContent = label; t.style.cssText = 'width:64px;color:#5f6368;font-size:12px'; l.append(t, el); el.style.flex = '1'; p.append(l); return el; };
+      const type = document.createElement('select');
+      for (const t of CHART_TYPES) type.add(new Option(t, t, false, t === ch.type));
+      row('Type', type);
+      const title = row('Title', Object.assign(document.createElement('input'), { value: ch.title || '' }));
+      const src = row('Data', Object.assign(document.createElement('input'), { value: ch.type === 'kpi' ? ch.value || '' : ch.table ? '@' + ch.table : ch.range || '', placeholder: 'B6:C10 · @Table · C12 (kpi)' }));
+      const xi = row('X col', Object.assign(document.createElement('input'), { value: ch.x || '', placeholder: 'table: label column' }));
+      const yi = row('Y cols', Object.assign(document.createElement('input'), { value: (ch.y || []).join(', '), placeholder: 'table: value columns' }));
+      const save = document.createElement('button'); save.className = 'btn'; save.textContent = 'Save';
+      const del = document.createElement('button'); del.className = 'btn'; del.textContent = 'Delete'; del.style.background = '#c5221f';
+      save.onclick = () => {
+        close();
+        const t = type.value, v = src.value.trim();
+        const o = { op: 'updateChart', id: ch.id, type: t, title: title.value || null };
+        if (t === 'kpi') o.value = v; else if (v.startsWith('@')) { o.range = v; o.x = xi.value.trim() || null; o.y = yi.value.trim() ? yi.value.split(',').map((x) => x.trim()) : null; } else o.range = v;
+        if (t === 'kpi' && ch.type !== 'kpi') { o.w = 220; o.h = 120; }
+        if (t !== 'kpi' && ch.type === 'kpi') { o.w = 440; o.h = 260; }
+        submit([o]);
+        ed.focus();
+      };
+      del.onclick = () => { close(); submit([{ op: 'deleteChart', id: ch.id }]); selChart = null; ed.focus(); };
+      p.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); save.click(); } });
+      p.append(save, del);
+      setTimeout(() => title.focus());
+    });
+  }
+  function insertChart(anchorEl) {
+    const R = clampFull(lastR());
+    const tab = tableAt(doc, sh().name, sel.active.c, sel.active.r);
+    const single = R.c1 === R.c2 && R.r1 === R.r2;
+    const o = { op: 'addChart', sheet: sh().name, type: 'column', at: addr((tab && single ? tab.R.c2 : R.c2) + 2, tab && single ? tab.R.r1 : R.r1) };
+    if (tab && single) o.table = tab.t.name;
+    else if (single) { o.type = 'kpi'; o.value = addr(R.c1, R.r1); o.at = addr(R.c1 + 2, R.r1); }
+    else o.range = rangeToString(R);
+    let n = 1;
+    while (doc.sheets.some((s2) => (s2.charts || []).some((c) => c.id === 'chart' + n))) n++;
+    o.id = 'chart' + n;
+    if (submit([o])) {
+      selChart = o.id;
+      const ch = sh().charts.find((c) => c.id === o.id);
+      const r = chartRect(ch), b = scroller.getBoundingClientRect();
+      requestDraw();
+      chartEditor(ch, { left: b.left + r.x, bottom: b.top + r.y + 24 });
+    }
+  }
+
   function drawHeaders(ca, cb, ra, rb) {
     const f = fz(), X0 = hw(), Y0 = hh(), XF = X0 + frozenW(), YF = Y0 + frozenH();
     const pointing = edit && !sameName(edit.sheet, sheetName);
@@ -476,11 +589,12 @@ export function mount(root, ctx) {
     const EM = mergeR(edit.c, edit.r);
     const er = EM ? rectOf(EM) : null;
     const x = sx(edit.c), y = sy(edit.r), w = er ? er.w : cw(edit.c) * z, h = er ? er.h : rh(edit.r) * z;
-    const font = `${FONT * z}px Arial, Helvetica, sans-serif`;
+    const efs = (sh().cells[addr(edit.c, edit.r)]?.s?.fs || FONT) * z;
+    const font = `${efs}px Arial, Helvetica, sans-serif`;
     g.font = font;
     const lines = ed.value.split('\n');
     const tw = Math.max(...lines.map((l) => g.measureText(l + 'MM').width));
-    const lh = FONT * z * 1.3;
+    const lh = efs * 1.3;
     ed.className = 'sv-editor';
     ed.style.font = font;
     ed.style.left = x - 2 + 'px';
@@ -922,6 +1036,10 @@ export function mount(root, ctx) {
           { label: 'Rename', action: () => renameTab(b, s) },
           { label: 'Delete', disabled: doc.sheets.length < 2, action: () => submit([{ op: 'deleteSheet', sheet: s.name }]) },
           { label: 'Copy reference', action: () => navigator.clipboard?.writeText(quoteSheet(s.name) + '!A1') },
+          '-',
+          { label: '📄 Generate document → new Notes canvas', action: () => exportToNotes(s.name) },
+          { label: '⬇ Download HTML report (charts as images)', action: () => downloadHtml(s.name) },
+          { label: '⬇ Download Markdown', action: () => download(`${s.name}.md`, toMarkdown(sheetBlocks(doc, s.name)), 'text/markdown') },
         ]);
       };
       tabsEl.append(b);
@@ -943,6 +1061,37 @@ export function mount(root, ctx) {
     b.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); done(true); } if (e.key === 'Escape') done(false); e.stopPropagation(); };
     b.onblur = () => done(true);
   }
+  function download(name, text, type) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type }));
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  async function downloadHtml(name) {
+    const b = sheetBlocks(doc, name);
+    const imgs = {};
+    const s2 = doc.sheets.find((x) => x.name === name);
+    for (const ch of s2.charts || []) {
+      if (ch.type === 'kpi') continue;
+      const cv = document.createElement('canvas');
+      cv.width = ch.w * 2; cv.height = ch.h * 2;
+      const g2 = cv.getContext('2d'); g2.scale(2, 2);
+      try { drawChart(g2, { x: 0, y: 0, w: ch.w, h: ch.h }, ch, chartData(doc, name, ch, engine), 1, false); imgs[ch.id] = { src: cv.toDataURL('image/png'), w: ch.w }; } catch {}
+    }
+    // inline uploaded images so the file stands alone
+    for (const bl of b.blocks) if (bl.t === 'img' && bl.url.startsWith('/assets/')) {
+      try { const r = await fetch(bl.url); const blob = await r.blob(); bl.url = await new Promise((ok) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.readAsDataURL(blob); }); } catch {}
+    }
+    download(`${name}.html`, toHtml(b, imgs), 'text/html');
+  }
+  async function exportToNotes(name) {
+    const md = toMarkdown(sheetBlocks(doc, name));
+    const r = await ctx.post('/api/docs', { type: 'text', title: `${name} – raportti`, by: 'user' });
+    await ctx.post('/api/ops', { doc: r.id, by: 'user', ops: [{ op: 'setText', text: md }] });
+    ctx.toast(`Document "${name} – raportti" created`);
+    location.hash = r.id;
+  }
   $('.sv-addsheet').onmousedown = (e) => e.preventDefault();
   $('.sv-addsheet').onclick = () => {
     let i = doc.sheets.length + 1;
@@ -958,6 +1107,7 @@ export function mount(root, ctx) {
     <button class="tb" data-a="redo" title="Redo (Ctrl+Y)">↷</button>
     <select class="tb" data-a="zoom" title="Zoom (Ctrl+wheel / pinch)">${[50, 75, 90, 100, 125, 150, 200, 300].map((p) => `<option value="${p}">${p}%</option>`).join('')}</select>
     <div class="sep"></div>
+    <select class="tb" data-a="fs" title="Font size">${[9, 10, 11, 13, 16, 20, 24, 32, 40, 56, 72].map((p) => `<option value="${p}">${p}</option>`).join('')}</select>
     <button class="tb" data-a="b" title="Bold (Ctrl+B)"><b>B</b></button>
     <button class="tb" data-a="i" title="Italic (Ctrl+I)"><i>I</i></button>
     <button class="tb" data-a="s" title="Strikethrough"><s>S</s></button>
@@ -972,13 +1122,33 @@ export function mount(root, ctx) {
     <button class="tb" data-a="borders" title="Borders">⊞</button>
     <button class="tb" data-a="merge" title="Merge cells">⧉</button>
     <button class="tb" data-a="table" title="Make a named table from the selection">▦</button>
+    <button class="tb" data-a="chart" title="Insert chart from selection (or table / KPI from one cell)">📊</button>
     <div class="sep"></div>
     <button class="tb" data-a="freeze" title="Freeze rows/cols up to the active cell">❄</button>
+    <button class="tb" data-a="grid" title="Show / hide gridlines (dashboard look)">#</button>
     <button class="tb" data-a="sum" title="Insert =SUM of selection below">Σ</button>`;
   ctx.toolbar.append(tb);
   const zoomSel = tb.querySelector('[data-a=zoom]');
   zoomSel.value = '100';
   zoomSel.onchange = () => { setZoom(+zoomSel.value / 100); ed.focus(); };
+  const fsSel = tb.querySelector('[data-a=fs]');
+  fsSel.value = String(FONT);
+  fsSel.onchange = () => { setFontSize(+fsSel.value); ed.focus(); };
+  function setFontSize(fs) {
+    const s = sh();
+    const ranges = sel.ranges.map((R) => clampFull(R));
+    const ops = [{ op: 'format', sheet: s.name, ranges: ranges.map(rangeToString), style: { fs: fs === FONT ? null : fs } }];
+    // grow rows so the text fits (Sheets auto-fits row height)
+    const rows = {};
+    for (const R of ranges) for (let r = R.r1; r <= Math.min(R.r2, R.r1 + 500); r++) {
+      let max = fs;
+      for (const A in s.cells) { const p = parseAddr(A); if (p.r === r && !(p.c >= R.c1 && p.c <= R.c2)) max = Math.max(max, s.cells[A].s?.fs || FONT); }
+      const need = Math.round(max * 1.45 + 6);
+      if (need > (s.rowH[r] ?? DEF_H)) rows[r + 1] = need;
+    }
+    if (Object.keys(rows).length) ops.push({ op: 'resize', sheet: s.name, rows });
+    submit(ops);
+  }
   tb.querySelectorAll('button').forEach((b) => {
     b.onmousedown = (e) => e.preventDefault();
     b.onclick = () => toolbarAction(b.dataset.a, b);
@@ -992,6 +1162,8 @@ export function mount(root, ctx) {
       case 'color': case 'fill': return colorPicker(btn, a);
       case 'freeze': return freezeMenu(btn.getBoundingClientRect());
       case 'wrap': return toggleStyle('wrap');
+      case 'chart': return insertChart(btn);
+      case 'grid': return submit([{ op: 'view', sheet: sh().name, grid: sh().view?.grid === false }]);
       case 'borders': return bordersPopover(btn);
       case 'merge': return mergeMenu(btn.getBoundingClientRect());
       case 'table': return createTable(btn);
@@ -1088,6 +1260,9 @@ export function mount(root, ctx) {
     const st = sh().cells[addr(sel.active.c, sel.active.r)]?.s || {};
     for (const k of ['b', 'i', 's', 'wrap']) tb.querySelector(`[data-a=${k}]`).classList.toggle('on', !!st[k]);
     for (const k of ['left', 'center', 'right']) tb.querySelector(`[data-a=${k}]`).classList.toggle('on', st.align === k);
+    tb.querySelector('[data-a=grid]').classList.toggle('on', sh().view?.grid === false);
+    const fsSel2 = tb.querySelector('[data-a=fs]');
+    if (fsSel2 && document.activeElement !== fsSel2) fsSel2.value = String(st.fs || FONT);
   }
 
   function setZoom(nz, ax = hw() + 1, ay = hh() + 1) {
@@ -1126,6 +1301,12 @@ export function mount(root, ctx) {
 
   function navKey(e) {
     const mod = e.ctrlKey || e.metaKey, k = e.key;
+    if (selChart) {
+      if (k === 'Delete' || k === 'Backspace') { e.preventDefault(); submit([{ op: 'deleteChart', id: selChart }]); selChart = null; return; }
+      if (k === 'Escape') { selChart = null; requestDraw(); return; }
+      if (k === 'Enter') { e.preventDefault(); const ch = (sh().charts || []).find((c) => c.id === selChart); if (ch) { const r = chartRect(ch), b = scroller.getBoundingClientRect(); chartEditor(ch, { left: b.left + r.x, bottom: b.top + r.y + 30 }); } return; }
+      selChart = null; requestDraw();
+    }
     const arrows = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
     if (arrows[k]) { e.preventDefault(); return moveActive(...arrows[k], e.shiftKey, mod); }
     if (mod) {
@@ -1233,7 +1414,22 @@ export function mount(root, ctx) {
   // clipboard (only when not editing; editor handles its own text otherwise)
   ed.addEventListener('copy', (e) => { if (edit) return; e.preventDefault(); e.clipboardData.setData('text/plain', copySel(false)); });
   ed.addEventListener('cut', (e) => { if (edit) return; e.preventDefault(); e.clipboardData.setData('text/plain', copySel(true)); });
-  ed.addEventListener('paste', (e) => { if (edit) return; e.preventDefault(); paste(e.clipboardData.getData('text/plain')); });
+  ed.addEventListener('paste', (e) => {
+    if (edit) return;
+    e.preventDefault();
+    const f = [...(e.clipboardData.files || [])].find((x) => x.type.startsWith('image/'));
+    if (f) return uploadImage(f, sel.active.c, sel.active.r);
+    paste(e.clipboardData.getData('text/plain'));
+  });
+  scroller.addEventListener('dragover', (e) => { if ([...(e.dataTransfer?.items || [])].some((i) => i.kind === 'file')) e.preventDefault(); });
+  scroller.addEventListener('drop', (e) => {
+    const f = [...(e.dataTransfer?.files || [])].find((x) => x.type.startsWith('image/'));
+    if (!f) return;
+    e.preventDefault();
+    const { x, y } = local(e);
+    const p = hit(x, y);
+    if (p.c >= 0 && p.r >= 0) { setActive(p); uploadImage(f, p.c, p.r); }
+  });
 
   // ================================================================ mouse
   const local = (e) => { const r = scroller.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
@@ -1276,6 +1472,16 @@ export function mount(root, ctx) {
     const p = hit(x, y);
     e.preventDefault();
     tip.hidden = true;
+    const hc = x > hw() && y > hh() ? hitChart(x, y) : null;
+    if (hc && !(edit && pointable())) {
+      if (edit) commitEdit();
+      selChart = hc.ch.id;
+      ed.focus();
+      drag = { type: 'chart', id: hc.ch.id, mode: hc.handle ? 'resize' : 'move', x0: x, y0: y, r0: hc.r, cur: null };
+      requestDraw();
+      return listen();
+    }
+    if (selChart) { selChart = null; requestDraw(); }
     if (p.r === -1 && p.c >= 0) { const ce = colEdge(x); if (ce >= 0) { drag = { type: 'colsize', i: ce, x0: x, s0: cw(ce) }; return listen(); } }
     if (p.c === -1 && p.r >= 0) { const re = rowEdge(y); if (re >= 0) { drag = { type: 'rowsize', i: re, y0: y, s0: rh(re) }; return listen(); } }
     if (edit && pointable() && p.c >= 0 && p.r >= 0) {
@@ -1357,6 +1563,12 @@ export function mount(root, ctx) {
         requestDraw();
         break;
       }
+      case 'chart': {
+        const dx = x - drag.x0, dy = y - drag.y0;
+        drag.cur = drag.mode === 'move' ? { x: drag.r0.x + dx, y: drag.r0.y + dy } : { w: Math.max(120 * z, drag.r0.w + dx), h: Math.max(70 * z, drag.r0.h + dy) };
+        requestDraw();
+        break;
+      }
       case 'colsize': preview = { kind: 'col', i: drag.i, size: Math.max(16, Math.round(drag.s0 + (x - drag.x0) / z)) }; rebuild(); requestDraw(); break;
       case 'rowsize': preview = { kind: 'row', i: drag.i, size: Math.max(10, Math.round(drag.s0 + (y - drag.y0) / z)) }; rebuild(); requestDraw(); break;
     }
@@ -1367,7 +1579,13 @@ export function mount(root, ctx) {
     const d = drag;
     drag = null;
     if (!d) return;
-    if (d.type === 'move' && (d.dr || d.dc)) {
+    if (d.type === 'chart' && d.cur) {
+      if (d.mode === 'move') {
+        const cx = Math.max(hw() + 1, d.cur.x), cy = Math.max(hh() + 1, d.cur.y);
+        const p = hit(cx, cy);
+        submit([{ op: 'updateChart', id: d.id, at: addr(Math.max(0, p.c), Math.max(0, p.r)), dx: Math.round((cx - sx(p.c)) / z), dy: Math.round((cy - sy(p.r)) / z) }]);
+      } else submit([{ op: 'updateChart', id: d.id, w: Math.round(d.cur.w / z), h: Math.round(d.cur.h / z) }]);
+    } else if (d.type === 'move' && (d.dr || d.dc)) {
       const R = d.src;
       const to = { c1: R.c1 + d.dc, r1: R.r1 + d.dr, c2: R.c2 + d.dc, r2: R.r2 + d.dr };
       submit([{ op: 'move', sheet: sh().name, from: rangeToString(R), to: addr(to.c1, to.r1) }]);
@@ -1391,6 +1609,8 @@ export function mount(root, ctx) {
 
   scroller.addEventListener('dblclick', (e) => {
     const { x, y } = local(e);
+    const hc = hitChart(x, y);
+    if (hc) return chartEditor(hc.ch, { left: e.clientX, bottom: e.clientY });
     const p = hit(x, y);
     if (p.r === -1 && p.c >= 0) { const ce = colEdge(x); if (ce >= 0) autofit(ce); return; }
     if (p.c === -1 && p.r >= 0) { const re = rowEdge(y); if (re >= 0) autofitRow(re); return; }
@@ -1403,7 +1623,9 @@ export function mount(root, ctx) {
     const { x, y } = local(e);
     const p = hit(x, y);
     let cur = 'default';
-    if (p.r === -1 && p.c >= 0 && colEdge(x) >= 0) cur = 'col-resize';
+    const hcv = x > hw() && y > hh() ? hitChart(x, y) : null;
+    if (hcv) cur = hcv.handle ? 'nwse-resize' : 'move';
+    else if (p.r === -1 && p.c >= 0 && colEdge(x) >= 0) cur = 'col-resize';
     else if (p.c === -1 && p.r >= 0 && rowEdge(y) >= 0) cur = 'row-resize';
     else if (nearFillHandle(x, y)) cur = 'crosshair';
     else if (nearBorder(x, y)) cur = 'grab';
@@ -1438,6 +1660,16 @@ export function mount(root, ctx) {
   scroller.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const { x, y } = local(e);
+    const hcm = hitChart(x, y);
+    if (hcm) {
+      selChart = hcm.ch.id; requestDraw();
+      return ctx.menu(e.clientX, e.clientY, [
+        { label: 'Edit chart…', action: () => chartEditor(hcm.ch, { left: e.clientX, bottom: e.clientY }) },
+        ...CHART_TYPES.filter((t) => t !== 'kpi' && t !== hcm.ch.type && hcm.ch.type !== 'kpi').map((t) => ({ label: `→ ${t}`, action: () => submit([{ op: 'updateChart', id: hcm.ch.id, type: t }]) })),
+        '-',
+        { label: 'Delete chart', action: () => { submit([{ op: 'deleteChart', id: hcm.ch.id }]); selChart = null; } },
+      ]);
+    }
     const p = hit(x, y);
     if (edit) commitEdit();
     if (p.c >= 0 && p.r >= 0 && !sel.ranges.some((R) => inRange(R, p.c, p.r))) setActive(p);
@@ -1455,6 +1687,7 @@ export function mount(root, ctx) {
       { label: `▦ ${tab.t.name}: remove table (keep data)`, action: () => submit([{ op: 'deleteTable', name: tab.t.name }]) },
       '-',
     ] : [{ label: '▦ Create table from selection…', action: () => createTable(e) }, '-'];
+    tableItems.unshift({ label: '📊 Insert chart', action: () => insertChart() });
     ed.focus();
     ctx.menu(e.clientX, e.clientY, [
       ...tableItems,
@@ -1559,6 +1792,7 @@ export function mount(root, ctx) {
     unmount() { ro.disconnect(); document.removeEventListener('keydown', docKey, true); ctx.toolbar.innerHTML = ''; },
     reload() { undoStack = []; redoStack = []; refresh(); },
     resized: () => setTimeout(resize, 0),
+    activeRef: () => `${quoteSheet(sh().name)}!${addr(sel.active.c, sel.active.r)}`,
     remote(evt) {
       engine.invalidate();
       if (!doc.sheets.find((s) => sameName(s.name, sheetName))) { sheetName = doc.sheets[0].name; sel = freshSel(); }

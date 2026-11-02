@@ -5,8 +5,16 @@ import { parse, literal, FErr, isErr, E } from './formula.js';
 const err = (c) => new FErr(c);
 const isRange = (v) => v && v.__range;
 
+/** Value produced by =IMAGE(url): renders as a picture in the cell. */
+export class Img {
+  constructor(url, mode) { this.url = url; this.mode = mode || 1; }
+  toString() { return this.url; }
+}
+export const isImg = (v) => v instanceof Img;
+
 export function fmtValue(v) {
   if (v === null || v === undefined) return '';
+  if (v instanceof Img) return `[image ${v.url}]`;
   if (isErr(v)) return v.code;
   if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
   if (typeof v === 'number') {
@@ -355,6 +363,8 @@ export const FN = {
   COLUMNS: (en, a, sh) => { const rg = en.rangeArg(a[0], sh); return rg.c2 - rg.c1 + 1; },
   NA: () => err(E.NA),
   PI: () => Math.PI,
+  IMAGE: (en, a, sh) => { need(a, 1, 2); const u = str(en.arg(a[0], sh)).trim(); if (!u) return err(E.VALUE); return new Img(u, a[1] ? num(en.arg(a[1], sh)) : 1); },
+  HYPERLINK: (en, a, sh) => (a[1] ? en.arg(a[1], sh) : en.arg(a[0], sh)),
 };
 
 /** Evaluate all formula cells -> Map("Sheet!A1" -> display string). */

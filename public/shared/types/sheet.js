@@ -81,6 +81,10 @@ export function apply(st, op) {
     case 'putCells': return opPutCells(st, op);
     case 'setTables': return opSetTables(st, op);
     case 'borders': return opBorders(st, op);
+    case 'view': return opView(st, op);
+    case 'addChart': return opAddChart(st, op);
+    case 'updateChart': return opUpdateChart(st, op);
+    case 'deleteChart': return opDeleteChart(st, op);
     case 'merge': return opMerge(st, op);
     case 'unmerge': return opUnmerge(st, op);
     case 'table': return opTable(st, op);
@@ -126,7 +130,7 @@ function opSet(st, op) {
   return { inverse: Object.entries(inv).map(([sheet, cells]) => ({ op: 'set', sheet, cells })), changes };
 }
 
-const STYLE_KEYS = ['b', 'i', 'u', 's', 'fill', 'color', 'align', 'wrap'];
+const STYLE_KEYS = ['b', 'i', 'u', 's', 'fill', 'color', 'align', 'wrap', 'fs', 'valign'];
 /** format: { sheet?, range | ranges: [...], style: { b:true, fill:"#fff2cc", align:"center", color:null } } */
 function opFormat(st, op) {
   const ranges = op.ranges || [op.range];
@@ -190,6 +194,7 @@ const preTables = (st) => ({
   op: 'setTables',
   tables: Object.fromEntries(st.sheets.map((s) => [s.name, s.tables ? clone(s.tables) : null])),
   merges: Object.fromEntries(st.sheets.map((s) => [s.name, s.merges ? [...s.merges] : null])),
+  charts: Object.fromEntries(st.sheets.map((s) => [s.name, s.charts ? clone(s.charts) : null])),
 });
 const isFormula = (v) => typeof v === 'string' && v[0] === '=';
 const intersects = (a, b) => a.c1 <= b.c2 && b.c1 <= a.c2 && a.r1 <= b.r2 && b.r1 <= a.r2;
@@ -257,6 +262,26 @@ function rewriteAll(st, fn, originOf = () => null) {
       if (!sameName(out.sheet, sh.name)) { const to = st.sheets.find((x) => sameName(x.name, out.sheet)); (to.merges ||= []).push(rangeToString(box)); return null; }
       return box.c1 === box.c2 && box.r1 === box.r2 ? null : rangeToString(box);
     }).filter(Boolean);
+  }
+  for (const sh of st.sheets) {
+    for (const ch of sh.charts || []) {
+      const tr = (str, isRange) => {
+        if (!str) return str;
+        const [sn, rs] = splitSheet(str);
+        const R = parseRange(rs);
+        if (!R) return str;
+        const ref = { sheet: sn, a: { c: R.c1, r: R.r1, ac: false, ar: false }, b: { c: R.c2, r: R.r2, ac: false, ar: false } };
+        const out = fn(ref, sn ?? sh.name, sh);
+        if (!out) return str;
+        const box = refBox(out.ref);
+        if (!isRange && !sameName(out.sheet, sh.name)) return str;
+        const prefix = !sameName(out.sheet, sh.name) || sn != null ? quoteSheet(out.sheet) + '!' : '';
+        return prefix + rangeToString(isRange ? box : { c1: box.c1, r1: box.r1, c2: box.c1, r2: box.r1 });
+      };
+      ch.at = tr(ch.at, false);
+      if (ch.range) ch.range = tr(ch.range, true);
+      if (ch.value) ch.value = tr(ch.value, false);
+    }
   }
   for (const [from, t, toName] of moves) {
     from.tables.splice(from.tables.indexOf(t), 1);
@@ -561,6 +586,101 @@ function opBorders(st, op) {
   };
 }
 
+/** view: { sheet, grid?: bool } — sheet display options (hide gridlines for dashboards). */
+function opView(st, op) {
+  const sh = findSheet(st, op.sheet);
+  const old = { ...(sh.view || {}) };
+  const v = { ...(sh.view || {}) };
+  if ('grid' in op) { if (op.grid === false) v.grid = false; else delete v.grid; }
+  if (Object.keys(v).length) sh.view = v; else delete sh.view;
+  return { inverse: [{ op: 'view', sheet: sh.name, grid: old.grid !== false }], changes: [{ k: 'layout', sheet: sh.name, what: `gridlines ${v.grid === false ? 'hidden' : 'shown'}` }] };
+}
+
+// ------------------------------------------------------------------ charts (floating, live)
+export const CHART_TYPES = ['column', 'bar', 'line', 'area', 'pie', 'kpi'];
+const CHART_KEYS = ['type', 'title', 'range', 'table', 'x', 'y', 'value', 'label', 'at', 'dx', 'dy', 'w', 'h', 'stacked', 'colors'];
+export function allCharts(st) { const out = []; for (const sh of st.sheets) for (const ch of sh.charts || []) out.push({ sh, ch }); return out; }
+function findChart(st, id) {
+  const x = allCharts(st).find((x) => x.ch.id === id);
+  if (!x) fail(`No chart "${id}". Charts: ${allCharts(st).map((x) => x.ch.id).join(', ') || '(none)'}`);
+  return x;
+}
+function checkChart(ch) {
+  if (!CHART_TYPES.includes(ch.type)) fail(`Bad chart type "${ch.type}" (${CHART_TYPES.join('|')})`);
+  if (ch.type === 'kpi' ? !ch.value : !ch.range && !ch.table) fail(ch.type === 'kpi' ? 'kpi chart needs value (cell, e.g. "C12")' : 'chart needs range ("B6:C10") or table');
+  if (!parseRange(splitSheet(ch.at)[1])) fail(`Bad anchor "${ch.at}"`);
+}
+/** addChart: { sheet?, type, range|table(+x,y[])|value(kpi), title?, at: "K2", w?, h? } */
+function opAddChart(st, op) {
+  const sh = findSheet(st, op.sheet);
+  let id = op.id;
+  if (!id) { let n = 1; while (allCharts(st).some((x) => x.ch.id === 'chart' + n)) n++; id = 'chart' + n; }
+  else if (allCharts(st).some((x) => x.ch.id === id)) fail(`Chart "${id}" exists`);
+  const ch = { id };
+  for (const k of CHART_KEYS) if (op[k] !== undefined && op[k] !== null) ch[k] = clone(op[k]);
+  if (typeof ch.range === 'string' && ch.range.startsWith('@')) { ch.table = ch.range.slice(1); delete ch.range; }
+  ch.at ||= 'H2'; ch.w ||= ch.type === 'kpi' ? 220 : 440; ch.h ||= ch.type === 'kpi' ? 120 : 260; ch.dx ||= 0; ch.dy ||= 0;
+  if (typeof ch.y === 'string') ch.y = ch.y.split(',').map((x) => x.trim());
+  checkChart(ch);
+  (sh.charts ||= []).push(ch);
+  return { inverse: [{ op: 'deleteChart', id }], changes: [{ k: 'chart', action: 'add', id, sheet: sh.name, type: ch.type, source: ch.table ? '@' + ch.table : ch.range || ch.value, at: ch.at }] };
+}
+function opUpdateChart(st, op) {
+  const { sh, ch } = findChart(st, op.id);
+  const old = { op: 'updateChart', id: op.id };
+  for (const k of CHART_KEYS) if (k in op) { old[k] = ch[k] === undefined ? null : clone(ch[k]); if (op[k] === null) delete ch[k]; else ch[k] = clone(op[k]); }
+  if (typeof ch.range === 'string' && ch.range.startsWith('@')) { ch.table = ch.range.slice(1); delete ch.range; if (!('table' in old)) old.table = null; }
+  if ('range' in op && op.range && !String(op.range).startsWith('@') && ch.table) { if (!('table' in old)) old.table = ch.table; delete ch.table; }
+  checkChart(ch);
+  const what = Object.keys(op).filter((k) => k !== 'op' && k !== 'id');
+  const moved = what.every((k) => ['at', 'dx', 'dy', 'w', 'h'].includes(k));
+  return { inverse: [old], changes: [{ k: 'chart', action: moved ? 'layout' : 'update', id: ch.id, sheet: sh.name, type: ch.type, fields: what }] };
+}
+function opDeleteChart(st, op) {
+  const { sh, ch } = findChart(st, op.id);
+  sh.charts.splice(sh.charts.indexOf(ch), 1);
+  if (!sh.charts.length) delete sh.charts;
+  return { inverse: [{ op: 'addChart', sheet: sh.name, ...clone(ch) }], changes: [{ k: 'chart', action: 'delete', id: ch.id, sheet: sh.name, type: ch.type }] };
+}
+
+/** Live data for a chart: { labels, series:[{name, values}] } or { kpi: {value, label} } */
+export function chartData(st, sheetName, ch, en = new Engine(st)) {
+  const sh = findSheet(st, sheetName);
+  const num = (v) => (typeof v === 'number' ? v : typeof v === 'boolean' ? +v : typeof v === 'string' && v.trim() !== '' && !isNaN(+v.replace(',', '.')) ? +v.replace(',', '.') : null);
+  if (ch.type === 'kpi') {
+    const [sn, a] = splitSheet(ch.value);
+    const s2 = findSheet(st, sn ?? sh.name);
+    const p = parseAddr(a);
+    const v = p ? en.value(s2, p.c, p.r) : null;
+    return { kpi: { value: v, text: fmtValue(v), label: ch.label || ch.title || '' } };
+  }
+  let header = [], body = [];
+  if (ch.table) {
+    const x = findTable(st, ch.table);
+    const cols = tableColumns(x.sh, x.R);
+    const xi = ch.x ? colIndex(x.sh, x.R, ch.x) : 0;
+    const rows = [];
+    for (let r = x.R.r1 + 1; r <= x.R.r2; r++) { const row = []; for (let c = x.R.c1; c <= x.R.c2; c++) row.push(en.value(x.sh, c, r)); rows.push(row); }
+    let yi = ch.y && ch.y.length ? ch.y.map((n) => colIndex(x.sh, x.R, n)) : cols.map((_, i) => i).filter((i) => i !== xi && rows.some((r) => num(r[i]) !== null));
+    return { labels: rows.map((r) => fmtValue(r[xi])), series: yi.map((i) => ({ name: cols[i], values: rows.map((r) => num(r[i])) })) };
+  }
+  const [sn, rs] = splitSheet(ch.range);
+  const s2 = findSheet(st, sn ?? sh.name);
+  const R = parseRange(rs);
+  const grid = [];
+  for (let r = R.r1; r <= Math.min(R.r2, R.r1 + 2000); r++) { const row = []; for (let c = R.c1; c <= Math.min(R.c2, R.c1 + 50); c++) row.push(en.value(s2, c, r)); grid.push(row); }
+  if (!grid.length) return { labels: [], series: [] };
+  const wide = grid[0].length > 1;
+  const hasHeader = grid.length > 1 && grid[0].slice(wide ? 1 : 0).some((v) => v !== null && num(v) === null);
+  if (hasHeader) { header = grid[0]; body = grid.slice(1); } else body = grid;
+  const labelCol = wide && body.some((r) => r[0] !== null && num(r[0]) === null);
+  const first = labelCol ? 1 : 0;
+  const labels = body.map((r, i) => (labelCol ? fmtValue(r[0]) : String(i + 1)));
+  const series = [];
+  for (let j = first; j < (body[0] || []).length; j++) series.push({ name: hasHeader ? fmtValue(header[j]) : `Series ${series.length + 1}`, values: body.map((r) => num(r[j])) });
+  return { labels, series };
+}
+
 export function mergeAt(sh, c, r) {
   for (const m of sh.merges || []) { const R = parseRange(m); if (inRange(R, c, r)) return R; }
   return null;
@@ -654,6 +774,11 @@ function opSetTables(st, op) {
     if (!sh) continue;
     if (list) sh.tables = clone(list); else delete sh.tables;
   }
+  for (const [name, list] of Object.entries(op.charts || {})) {
+    const sh = st.sheets.find((s) => sameName(s.name, name));
+    if (!sh) continue;
+    if (list) sh.charts = clone(list); else delete sh.charts;
+  }
   for (const [name, list] of Object.entries(op.merges || {})) {
     const sh = st.sheets.find((s) => sameName(s.name, name));
     if (!sh) continue;
@@ -693,6 +818,7 @@ function opRenameTable(st, op) {
   const old = x.t.name;
   x.t.name = validTableName(st, op.newName, x.t);
   for (const sh of st.sheets) for (const cell of Object.values(sh.cells)) if (isFormula(cell.v)) cell.v = renameTableRefs(cell.v, old, x.t.name);
+  for (const { ch } of allCharts(st)) if (ch.table && sameName(ch.table, old)) ch.table = x.t.name;
   return { inverse: [{ op: 'renameTable', name: x.t.name, newName: old }], changes: [{ k: 'table', action: 'rename', name: old, to: x.t.name, sheet: x.sh.name }] };
 }
 
@@ -861,6 +987,7 @@ export function describe(st) {
     return {
       name: s.name, used: u ? rangeToString(u) : null, cells: n, formulas: f, freeze: s.freeze,
       merges: s.merges || [],
+      charts: (s.charts || []).map((c) => ({ id: c.id, type: c.type, title: c.title, source: c.table ? '@' + c.table : c.range || c.value, at: c.at })),
       tables: (s.tables || []).map((t) => { const R = parseRange(t.range); return { name: t.name, range: t.range, rows: R.r2 - R.r1, columns: tableColumns(s, R) }; }),
     };
   });

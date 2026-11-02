@@ -1,9 +1,9 @@
 ---
-name: canvas-mini
-description: Work with the user in their live canvas-mini spreadsheet (A1 grid, formulas, multiple sheets, milestones). Use when the user refers to "the sheet", "taulukko", cell coordinates like C23, or asks you to read what they changed.
+name: lotus-456
+description: Work with the user in their live Lotus 456 spreadsheet (A1 grid, formulas, multiple sheets, milestones). Use when the user refers to "the sheet", "taulukko", cell coordinates like C23, or asks you to read what they changed.
 ---
 
-# canvas-mini — agent skill
+# Lotus 456 — agent skill
 
 A full-screen spreadsheet the user has open in a browser. You and the user edit the same workbook; every
 edit is versioned. Your job is to read **only what changed** and to write precise, minimal edits.
@@ -13,7 +13,7 @@ Server: `$CANVAS_URL` (default `http://127.0.0.1:3210`). CLI: `bin/cm.mjs` (alia
 ## Loop
 
 1. First contact: `cm overview` — docs, sheets, used ranges, the user's current selection.
-2. Before every reply: `cm changes` — only edits since your last call (your own are filtered out; cursor kept in `~/.canvas-mini-cursor`).
+2. Before every reply: `cm changes` — only edits since your last call (your own are filtered out; cursor kept in `~/.lotus456-cursor`).
    Long gap? `cm changes --net` collapses to net per-cell effect.
 3. Read narrowly: `cm read Budjetti!A1:F20`. Never dump whole sheets "just in case".
 4. Write: `cm set …`, `cm table …`, `cm move …`. The response echoes what changed and which formulas recalculated.
@@ -74,12 +74,39 @@ Change feed annotates table cells: `Projekti!C8: auki → valmis   ⟨Tehtävät
 Tables follow moves and row/column inserts. Formulas can use `Tehtävät[Tila]` (column) or `Tehtävät[#All]`:
 `=COUNTIF(Tehtävät[Tila],"auki")`. Cells are free text too — long notes are fine (`↵` wrap in the UI).
 
+## SQL (both directions) and JSON
+
+Every named table is a SQL table (Node's built-in SQLite, rebuilt per query). Other workbooks: `"doc.Table"`.
+```
+cm sql "SELECT t.Vastuu, COUNT(*) n FROM Tehtävät t GROUP BY 1"
+cm sql "SELECT … FROM Tehtävät t JOIN Osat o ON …"
+cm sql --write "UPDATE Tehtävät SET Tila='valmis' WHERE Vastuu='Isi'"     # → updateRows/removeRows/appendRows, undoable
+cm sql --into Yhteenveto@Dashboard!B30 "SELECT Tila, COUNT(*) kpl FROM Tehtävät GROUP BY Tila"   # result → new table
+cm json Tehtävät                          # flat JSON array
+cm put Tehtävät rows.json [Sheet!B2]      # JSON array → table (creates at B2 if missing)
+```
+
+## Charts, dashboards, images, documents
+
+Charts float over the grid, anchored to a cell, and read live data (range, named table or one cell for KPI).
+```
+cm chart column B6:C10 --at K2 --title "Hinnat"       # column | bar | line | area | pie | kpi
+cm chart pie @TilaJakauma --title "Tila"               # table source (--x label col, --y value cols)
+cm chart kpi Projekti!C12 --title "Avoimia" --at B5
+cm chart-show status                                   # chart's current data as text
+cm chart-set status type=bar w=500                     # cm chart-rm id
+cm fmt B2 '{"fs":32,"b":true}'                         # font size in px; valign: top|middle
+cm ops '[{"op":"view","sheet":"Dashboard","grid":false}]'   # hide gridlines (dashboard look)
+cm image B2 photo.png                                  # =IMAGE("url") — cells can hold pictures
+cm export Dashboard md                                 # sheet → document (headings, tables, charts, KPIs)
+```
+
 ## Formulas
 
 `+ - * / ^ & % = <> < > <= >=`, refs `A1 $A$1 A1:B9 Sheet!A1`, args separated by `,` or `;`.
 SUM AVERAGE MIN MAX COUNT COUNTA COUNTBLANK PRODUCT SUMIF COUNTIF AVERAGEIF IF IFS IFERROR AND OR NOT XOR
 ISBLANK ISNUMBER ISTEXT ISERROR ROUND ROUNDUP ROUNDDOWN INT ABS SQRT POWER MOD LEN UPPER LOWER TRIM LEFT RIGHT
-MID EXACT CONCAT CONCATENATE TEXTJOIN VLOOKUP MATCH INDEX ROWS COLUMNS PI NA.
+MID EXACT CONCAT CONCATENATE TEXTJOIN VLOOKUP MATCH INDEX ROWS COLUMNS PI NA IMAGE HYPERLINK.
 Errors: `#REF! #DIV/0! #NAME? #VALUE! #N/A #CYCLE! #ERROR!` (parse). Checks/validation = `IF(…,"ok","✗ …")` columns.
 
 ## Milestones
@@ -106,12 +133,18 @@ Errors: `#REF! #DIV/0! #NAME? #VALUE! #N/A #CYCLE! #ERROR!` (parse). Checks/vali
 | `POST /api/commit` `{message}` · `GET /api/commits` · `GET /api/diff?from=m3` · `POST /api/restore {commit}` | milestones |
 | `POST /api/focus {range, label}` | highlight where you work |
 | `POST /api/docs {type:"sheet"|"text", title}` | new canvas |
+| `POST /api/sql {sql, write?, into?:{name,at}}` | SQL over tables |
+| `GET /api/table?name=` · `PUT /api/table {name, rows, at?}` | table ⇄ JSON |
+| `GET /api/chart?id=` | chart data |
+| `GET /api/export?sheet=&format=md\|html\|json` | sheet as a document |
+| `POST /api/assets` (raw image body) | → `{url}` for `=IMAGE(url)` |
 | `GET /api/events` | SSE stream of every batch |
 
 Ops: `set {cells}|{range,values}` · `move {from,to}` · `insertRows|deleteRows {at,count}` · `insertCols|deleteCols {at:"C",count}` ·
 `format {range|ranges,style}` · `note {cell,text}` · `resize {cols:{A:140},rows:{"3":40}}` · `freeze {rows,cols}` ·
 `borders {range|ranges, type, style: solid|medium|thick|dashed|dotted|double, color}` ·
-`merge {range, type: all|horizontal|vertical}` · `unmerge {range}` · `addSheet {name}` · `renameSheet {sheet,name}` · `deleteSheet {sheet}` ·
+`merge {range, type: all|horizontal|vertical}` · `unmerge {range}` · `view {sheet, grid}` ·
+`addChart {type, range|table(+x,y)|value, title, at, dx, dy, w, h}` · `updateChart {id, …}` · `deleteChart {id}` · `addSheet {name}` · `renameSheet {sheet,name}` · `deleteSheet {sheet}` ·
 tables: `table {name,range}` · `deleteTable {name}` · `renameTable {name,newName}` · `appendRows {table,rows:[{Col:v}|[v,…]]}` ·
 `updateRows {table, key|match{Col:v}|rows[1..], set{Col:v}}` · `removeRows {table, key|match|rows}` · `addColumn {table,name,values?}`. Text docs: `setText {text}` · `append {text}`.
 Every op takes optional `sheet`; cell keys may carry a sheet prefix.

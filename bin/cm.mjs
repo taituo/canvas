@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const BASE = (process.env.CANVAS_URL || 'http://127.0.0.1:3210').replace(/\/$/, '');
-const CURSOR = process.env.CM_CURSOR || path.join(os.homedir(), '.canvas-mini-cursor');
+const CURSOR = process.env.CM_CURSOR || path.join(os.homedir(), '.lotus456-cursor');
 const DOC = process.env.CM_DOC || '';
 const BY = process.env.CM_BY || 'agent';
 
@@ -36,7 +36,7 @@ async function ops(list, extra = {}) {
   out(await call('POST', '/api/ops?format=text', { doc: DOC || undefined, by: BY, ops: list, ...extra }));
 }
 
-const help = `cm — canvas-mini agent CLI   (CANVAS_URL=${BASE})
+const help = `cm — Lotus 456 agent CLI   (CANVAS_URL=${BASE})
   cm overview                      docs, sheets, used ranges, user selection
   cm read [Sheet!A1:F20]           non-empty cells with formulas ⇒ values
   cm changes [--all] [--net]       what changed since your cursor (default: excludes your own edits)
@@ -56,6 +56,17 @@ const help = `cm — canvas-mini agent CLI   (CANVAS_URL=${BASE})
   cm update Tehtävät Servot Tila=valmis Vastuu=Isi             key = first-column value (or 'Tila=auki' to match)
   cm rm Tehtävät Servot | cm rm Tehtävät 'Tila=valmis'
   cm addcol Tehtävät Huom
+  cm sql "SELECT t.Tehtävä, o.Hinta FROM Tehtävät t JOIN Osat o ON …"   (other workbooks: "doc.Table")
+  cm sql --write "UPDATE Tehtävät SET Tila='valmis' WHERE Vastuu='Isi'"   written back as table ops
+  cm sql --into Yhteenveto@Projekti!K2 "SELECT Tila, COUNT(*) n FROM Tehtävät GROUP BY Tila"
+  cm json Tehtävät                 table as JSON array
+  cm put Tehtävät file.json [Sheet!B2]   replace/create table from JSON array (- = stdin)
+  cm chart column B6:C10 --at K2 --title "Hinnat"      types: column bar line area pie kpi
+  cm chart pie @Osat --x Osa --y Hinta  |  cm chart kpi C12 --title "Avoimia"
+  cm chart-show chart1             the chart's live data as text
+  cm chart-set chart1 type=line title="Uusi"  |  cm chart-rm chart1
+  cm image B2 photo.png            upload + =IMAGE("/assets/…") in the cell
+  cm export Dashboard [md|html]    sheet as a document (headings, tables, charts, KPIs)
   cm find text
   cm commit "message" | cm commits | cm diff [m3|last] | cm restore m3
   cm focus A1:B5 "label"           highlight where you're working
@@ -106,6 +117,44 @@ switch (cmd) {
     break;
   }
   case 'addcol': await ops([{ op: 'addColumn', table: args[0], name: args[1] }]); break;
+  case 'sql': {
+    const write = args.includes('--write');
+    const ii = args.indexOf('--into');
+    let into;
+    if (ii >= 0) { const [name, at] = args[ii + 1].split('@'); into = { name, at }; args.splice(ii, 2); }
+    const sql = args.filter((a) => a !== '--write').join(' ');
+    out(await call('POST', '/api/sql', { doc: DOC || undefined, sql, write, into, by: BY }));
+    break;
+  }
+  case 'json': out(await call('GET', '/api/table?' + qs({ doc: DOC, name: args[0] }))); break;
+  case 'put': {
+    const src = args[1] === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(args[1], 'utf8');
+    out(await call('PUT', '/api/table', { doc: DOC || undefined, name: args[0], rows: JSON.parse(src), at: args[2], by: BY }));
+    break;
+  }
+  case 'chart': {
+    const flag = (n) => { const i = args.indexOf('--' + n); if (i < 0) return undefined; const v = args[i + 1]; args.splice(i, 2); return v; };
+    const at = flag('at'), title = flag('title'), x = flag('x'), y = flag('y'), label = flag('label'), sheet = flag('sheet');
+    const [type, src] = args;
+    const o = { op: 'addChart', type, at, title, sheet, label };
+    if (type === 'kpi') o.value = src; else if (src.startsWith('@')) { o.table = src.slice(1); o.x = x; o.y = y ? y.split(',') : undefined; } else o.range = src;
+    await ops([o]);
+    break;
+  }
+  case 'chart-show': out(await call('GET', '/api/chart?' + qs({ doc: DOC, id: args[0] }))); break;
+  case 'chart-rm': await ops([{ op: 'deleteChart', id: args[0] }]); break;
+  case 'chart-set': await ops([{ op: 'updateChart', id: args[0], ...Object.fromEntries(args.slice(1).map((a) => { const i = a.indexOf('='); const k = a.slice(0, i), v = a.slice(i + 1); return [k, ['w', 'h', 'dx', 'dy'].includes(k) ? +v : v]; })) }]); break;
+  case 'image': {
+    const file = args[1];
+    const ext = path.extname(file).slice(1).toLowerCase();
+    const type = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' }[ext];
+    const r = await fetch(BASE + '/api/assets', { method: 'POST', headers: { 'content-type': type }, body: fs.readFileSync(file) });
+    const { url } = await r.json();
+    const m = /(\d+)$/.exec(args[0]);
+    await ops([{ op: 'set', cells: { [args[0]]: `=IMAGE("${url}")` } }, ...(m ? [{ op: 'resize', sheet: args[0].includes('!') ? args[0].split('!')[0].replace(/^'|'$/g, '') : undefined, rows: { [m[1]]: 120 } }] : [])]);
+    break;
+  }
+  case 'export': out(await call('GET', '/api/export?' + qs({ doc: DOC, sheet: args[0], format: args[1] || 'md' }))); break;
   case 'find': out(await call('GET', '/api/find?' + qs({ doc: DOC, q: args.join(' ') }))); break;
   case 'commit': out(await call('POST', '/api/commit', { message: args.join(' '), by: BY })); break;
   case 'commits': out(await call('GET', '/api/commits')); break;
