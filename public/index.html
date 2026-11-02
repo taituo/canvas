@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="fi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>canvas-mini</title>
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header id="top">
+    <div class="brand" title="canvas-mini">▦</div>
+    <nav id="docs"></nav>
+    <div class="sep"></div>
+    <div id="toolslot"></div>
+    <div class="grow"></div>
+    <div id="activity" title="Latest agent activity"></div>
+    <span id="ver" title="Workspace version">v0</span>
+    <span id="conn" title="Live connection"></span>
+    <button id="btnMilestone" class="tb wide" title="Save a named milestone (Ctrl+S)">⚑ Milestone</button>
+    <button id="btnHistory" class="tb wide" title="History, diffs, restore">History</button>
+  </header>
+  <main id="stage">
+    <div id="view"></div>
+    <aside id="drawer" hidden></aside>
+  </main>
+  <div id="toasts"></div>
+</body>
+</html>

@@ -1,0 +1,329 @@
+// Shell: doc tabs, live sync (SSE), history drawer, milestones. Canvas views live in /canvases/<type>/view.js
+import { applyDocOp, replaceInPlace } from './shared/types/index.js';
+
+const $ = (s) => document.querySelector(s);
+const clientId = Math.random().toString(36).slice(2, 10);
+const S = { version: 0, docs: [], commits: [], docId: null, doc: null, view: null, pending: 0, dirty: false, lastAgent: null };
+
+// ------------------------------------------------------------------ http
+async function http(method, url, body) {
+  const r = await fetch(url, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const ct = r.headers.get('content-type') || '';
+  const data = ct.includes('json') ? await r.json() : await r.text();
+  if (!r.ok) throw new Error(data.error || data || r.statusText);
+  return data;
+}
+const get = (u) => http('GET', u);
+const post = (u, b) => http('POST', u, b);
+
+// ------------------------------------------------------------------ ui helpers
+export function toast(msg, err) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (err ? ' err' : '');
+  t.textContent = msg;
+  $('#toasts').append(t);
+  setTimeout(() => t.remove(), err ? 5000 : 2500);
+}
+
+let openLayer = null;
+function closeLayer() { openLayer?.remove(); openLayer = null; }
+addEventListener('mousedown', (e) => { if (openLayer && !openLayer.contains(e.target)) closeLayer(); }, true);
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && openLayer) { closeLayer(); e.stopPropagation(); } }, true);
+
+function place(el, x, y) {
+  document.body.append(el);
+  const r = el.getBoundingClientRect();
+  el.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 4)) + 'px';
+  el.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 4)) + 'px';
+}
+
+/** items: [{label, kbd, action, disabled} | '-'] */
+export function menu(x, y, items) {
+  closeLayer();
+  const m = document.createElement('div');
+  m.className = 'menu';
+  for (const it of items) {
+    if (it === '-') { m.append(document.createElement('hr')); continue; }
+    const d = document.createElement('div');
+    d.className = 'it' + (it.disabled ? ' dis' : '');
+    d.textContent = it.label;
+    if (it.kbd) { const k = document.createElement('kbd'); k.textContent = it.kbd; d.append(k); }
+    d.onmousedown = (e) => e.preventDefault();
+    d.onclick = () => { closeLayer(); it.action(); };
+    m.append(d);
+  }
+  openLayer = m;
+  place(m, x, y);
+}
+
+export function popover(anchor, build) {
+  closeLayer();
+  const p = document.createElement('div');
+  p.className = 'pop';
+  build(p, closeLayer);
+  openLayer = p;
+  const r = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : anchor;
+  place(p, r.left, r.bottom + 4);
+  return p;
+}
+
+// ------------------------------------------------------------------ ctx given to views
+let selTimer = null;
+const ctx = {
+  clientId, toast, menu, popover, get, post,
+  get doc() { return S.doc; },
+  get docId() { return S.docId; },
+  toolbar: $('#toolslot'),
+  /** Apply ops locally (optimistic), send to server. Returns inverse ops or null on error. */
+  submit(ops, label) {
+    const inverse = [];
+    try {
+      for (const op of ops) { const r = applyDocOp(S.doc, op); inverse.unshift(...r.inverse); }
+    } catch (e) {
+      toast(e.message, true);
+      reloadDoc();
+      return null;
+    }
+    S.pending++;
+    post('/api/ops', { doc: S.docId, by: 'user', clientId, ops, label })
+      .then((r) => { S.version = Math.max(S.version, r.version); renderVer(); })
+      .catch((e) => { toast(e.message, true); S.dirty = true; })
+      .finally(() => { S.pending--; if (!S.pending && S.dirty) reloadDoc(); });
+    return inverse;
+  },
+  reportSelection(sel) {
+    clearTimeout(selTimer);
+    selTimer = setTimeout(() => post('/api/selection', { doc: S.docId, ...sel }).catch(() => {}), 250);
+  },
+  milestone: () => milestonePopover(),
+};
+
+// ------------------------------------------------------------------ docs
+function renderDocs() {
+  const nav = $('#docs');
+  nav.innerHTML = '';
+  for (const d of S.docs) {
+    const b = document.createElement('button');
+    b.className = 'doctab' + (d.id === S.docId ? ' on' : '');
+    b.innerHTML = `<span class="ico">${d.type === 'sheet' ? '▦' : '¶'}</span>`;
+    b.append(d.title);
+    b.title = `${d.title}  [${d.id}]`;
+    b.onmousedown = (e) => e.preventDefault();
+    b.onclick = () => openDoc(d.id);
+    b.ondblclick = () => renameDoc(d);
+    b.oncontextmenu = (e) => {
+      e.preventDefault();
+      menu(e.clientX, e.clientY, [
+        { label: 'Rename', action: () => renameDoc(d) },
+        { label: 'Delete canvas', disabled: S.docs.length < 2, action: () => http('DELETE', `/api/docs?id=${d.id}&by=user`).catch((er) => toast(er.message, true)) },
+      ]);
+    };
+    nav.append(b);
+  }
+  const add = document.createElement('button');
+  add.className = 'tb';
+  add.textContent = '+';
+  add.title = 'New canvas';
+  add.onclick = (e) => menu(e.clientX, e.clientY + 12, [
+    { label: '▦  Spreadsheet', action: () => newDoc('sheet', 'Workbook') },
+    { label: '¶  Text / notes', action: () => newDoc('text', 'Notes') },
+  ]);
+  nav.append(add);
+}
+async function newDoc(type, title) {
+  const r = await post('/api/docs', { type, title, by: 'user' });
+  await refreshWorkspace();
+  openDoc(r.id);
+}
+function renameDoc(d) {
+  popover($('#docs'), (p, close) => {
+    const i = document.createElement('input');
+    i.value = d.title;
+    const ok = document.createElement('button');
+    ok.className = 'btn'; ok.textContent = 'Rename';
+    const go = () => { http('PATCH', `/api/docs?id=${d.id}`, { title: i.value, by: 'user' }).catch((e) => toast(e.message, true)); close(); };
+    ok.onclick = go;
+    i.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
+    p.append(i, ok);
+    setTimeout(() => { i.focus(); i.select(); });
+  });
+}
+
+async function refreshWorkspace() {
+  const ws = await get('/api/workspace');
+  S.docs = ws.docs; S.commits = ws.commits; S.version = ws.version;
+  renderDocs(); renderVer();
+}
+
+async function openDoc(id) {
+  const r = await get('/api/doc?id=' + encodeURIComponent(id));
+  S.view?.unmount?.();
+  $('#toolslot').innerHTML = '';
+  $('#view').innerHTML = '';
+  S.docId = id;
+  S.doc = r.doc;
+  S.version = Math.max(S.version, r.version);
+  const mod = await import(`./canvases/${r.doc.type}/view.js`);
+  S.view = mod.mount($('#view'), ctx);
+  history.replaceState(null, '', '#' + id);
+  renderDocs(); renderVer();
+}
+
+async function reloadDoc() {
+  S.dirty = false;
+  if (!S.docId) return;
+  try {
+    const r = await get('/api/doc?id=' + encodeURIComponent(S.docId));
+    replaceInPlace(S.doc, r.doc);
+    S.version = r.version;
+    S.view?.reload?.();
+    renderVer();
+  } catch { /* doc deleted */ }
+}
+
+function renderVer() { $('#ver').textContent = 'v' + S.version; }
+
+// ------------------------------------------------------------------ live
+function connect() {
+  const es = new EventSource('/api/events');
+  es.onopen = () => $('#conn').classList.add('ok');
+  es.onerror = () => $('#conn').classList.remove('ok');
+  es.onmessage = (m) => {
+    const e = JSON.parse(m.data);
+    if (e.type === 'hello') { if (S.version && e.version !== S.version) { refreshWorkspace(); reloadDoc(); } return; }
+    if (e.type === 'docs') {
+      S.version = e.v; S.docs = e.docs; renderDocs(); renderVer();
+      if (!S.docs.find((d) => d.id === S.docId)) openDoc(S.docs[0].id);
+      return;
+    }
+    if (e.type === 'commit') { S.commits.push(e.commit); if (!$('#drawer').hidden) renderDrawer(); toast(`Milestone ${e.commit.id}: ${e.commit.message}`); return; }
+    if (e.type === 'focus') { if (e.doc === S.docId) S.view?.focus?.(e); return; }
+    if (e.type !== 'batch') return;
+    S.version = Math.max(S.version, e.v);
+    renderVer();
+    if (e.by !== 'user') {
+      S.lastAgent = { by: e.by, ts: Date.now(), where: e.touched.slice(0, 3).map((t) => `${t.sheet ?? ''}${t.sheet ? '!' : ''}${t.range}`).join(', ') || e.doc };
+      renderActivity();
+    }
+    if (!$('#drawer').hidden) renderDrawerSoon();
+    if (e.doc !== S.docId || e.clientId === clientId) return;
+    if (S.pending) { S.dirty = true; return; }
+    try { for (const op of e.ops) applyDocOp(S.doc, op); } catch { reloadDoc(); return; }
+    S.view?.remote?.(e);
+  };
+}
+
+function renderActivity() {
+  const a = S.lastAgent;
+  if (!a) return;
+  const s = Math.round((Date.now() - a.ts) / 1000);
+  $('#activity').textContent = `● ${a.by}: ${a.where} · ${s < 60 ? s + 's' : Math.round(s / 60) + 'min'} ago`;
+}
+setInterval(renderActivity, 5000);
+
+// ------------------------------------------------------------------ milestones + history
+function milestonePopover() {
+  popover($('#btnMilestone'), (p, close) => {
+    const i = document.createElement('input');
+    i.placeholder = 'Milestone message…';
+    i.style.width = '240px';
+    const ok = document.createElement('button');
+    ok.className = 'btn'; ok.textContent = 'Save';
+    const go = async () => {
+      close();
+      try { const c = await post('/api/commit', { message: i.value || 'milestone', by: 'user' }); toast(`Saved ${c.id} at v${c.version}`); } catch (e) { toast(e.message, true); }
+    };
+    ok.onclick = go;
+    i.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
+    p.append(i, ok);
+    setTimeout(() => i.focus());
+  });
+}
+$('#btnMilestone').onclick = milestonePopover;
+addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); milestonePopover(); }
+});
+
+$('#btnHistory').onclick = () => {
+  const d = $('#drawer');
+  d.hidden = !d.hidden;
+  $('#btnHistory').classList.toggle('on', !d.hidden);
+  if (!d.hidden) renderDrawer();
+  S.view?.resized?.();
+};
+
+let drawerTimer = null;
+function renderDrawerSoon() { clearTimeout(drawerTimer); drawerTimer = setTimeout(renderDrawer, 300); }
+
+async function renderDrawer() {
+  const d = $('#drawer');
+  d.innerHTML = '';
+  const head = document.createElement('header');
+  head.innerHTML = '<span style="flex:1">History</span>';
+  const x = document.createElement('button'); x.className = 'tb'; x.textContent = '✕'; x.onclick = () => $('#btnHistory').click();
+  head.append(x);
+  const ms = document.createElement('section');
+  ms.innerHTML = '<h4>Milestones</h4>';
+  if (!S.commits.length) ms.insertAdjacentHTML('beforeend', '<div style="color:var(--muted)">None yet — Ctrl+S</div>');
+  for (const c of [...S.commits].reverse().slice(0, 12)) {
+    const row = document.createElement('div');
+    row.className = 'ms';
+    const msg = document.createElement('span'); msg.className = 'msg'; msg.textContent = c.message; msg.title = `${c.by} · ${new Date(c.ts).toLocaleString()}`;
+    const meta = document.createElement('small'); meta.textContent = `${c.id} v${c.version}`;
+    const diff = document.createElement('button'); diff.className = 'mini'; diff.textContent = 'Diff';
+    diff.onclick = () => showDiff(c);
+    const rs = document.createElement('button'); rs.className = 'mini'; rs.textContent = 'Restore';
+    rs.onclick = async () => {
+      if (!rs.classList.contains('warn')) { rs.classList.add('warn'); rs.textContent = 'Confirm?'; return; }
+      try { await post('/api/restore', { commit: c.id, doc: S.docId, by: 'user' }); toast(`Restored ${c.id}`); } catch (e) { toast(e.message, true); }
+    };
+    row.append(meta, msg, diff, rs);
+    ms.append(row);
+  }
+  const pre = document.createElement('pre');
+  d.append(head, ms, pre);
+  try {
+    const txt = await get(`/api/changes?since=${Math.max(0, S.version - 60)}&doc=${S.docId}`);
+    linkify(pre, txt.split('\n').reverse().filter((l) => !l.startsWith('cursor:')).join('\n'));
+  } catch (e) { pre.textContent = e.message; }
+}
+
+/** Turn Sheet!A1 tokens into jump links. */
+function linkify(pre, text) {
+  pre.innerHTML = '';
+  for (const line of text.split('\n')) {
+    const re = /([\p{L}\p{N}_.-]+)!([A-Z]{1,3}\d+(?::[A-Z]{1,3}\d+)?)/gu;
+    let last = 0, m;
+    const div = document.createElement('div');
+    if (/^v\d+ /.test(line)) div.className = 'v' + (/ user /.test(line) ? '' : ' agent');
+    while ((m = re.exec(line))) {
+      div.append(line.slice(last, m.index));
+      const a = document.createElement('span');
+      a.className = 'lnk'; a.textContent = m[0];
+      const [sheet, range] = [m[1], m[2]];
+      a.onclick = () => S.view?.goto?.(sheet, range);
+      div.append(a);
+      last = m.index + m[0].length;
+    }
+    div.append(line.slice(last));
+    pre.append(div);
+  }
+}
+
+async function showDiff(c) {
+  try {
+    const d = await get(`/api/diff?from=${c.id}&doc=${S.docId}&format=json`);
+    S.view?.showDiff?.(d, c);
+    const txt = await get(`/api/diff?from=${c.id}&doc=${S.docId}`);
+    linkify($('#drawer pre'), txt);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ------------------------------------------------------------------ boot
+(async () => {
+  await refreshWorkspace();
+  const want = location.hash.slice(1);
+  await openDoc(S.docs.find((d) => d.id === want) ? want : S.docs[0].id);
+  connect();
+  addEventListener('hashchange', () => { const id = location.hash.slice(1); if (id && id !== S.docId && S.docs.find((d) => d.id === id)) openDoc(id); });
+})();
